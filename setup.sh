@@ -979,7 +979,7 @@ install_dependencies() {
     log_info "安装系统依赖..."
     
     apt-get update
-    apt-get install -y curl wget git sudo apt-transport-https ca-certificates gnupg lsb-release python3 python3-json
+    apt-get install -y curl wget git sudo apt-transport-https ca-certificates gnupg lsb-release python3
     
     log_success "依赖安装完成"
 }
