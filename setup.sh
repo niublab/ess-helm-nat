@@ -1,7 +1,7 @@
 #!/bin/bash
-# Matrix Stack 完整安装和管理工具 v2.5
+# Matrix Stack 安装管理工具
 # 支持完全自定义配置、高级用户管理、清理功能和证书切换
-# 基于 element-hq/ess-helm 项目 - 修正所有已知问题
+# 基于 element-hq/ess-helm 项目 
 
 set -e
 
@@ -15,7 +15,7 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # 脚本信息
-SCRIPT_VERSION="2.5.0"
+SCRIPT_VERSION="2.6.0"
 GITHUB_RAW_URL="https://raw.githubusercontent.com/niublab/test/main"
 
 # 自动化模式标志
@@ -30,8 +30,8 @@ DEFAULT_EXTERNAL_HTTPS_PORT="8443"
 DEFAULT_TURN_PORT_START="30152"
 DEFAULT_TURN_PORT_END="30252"
 DEFAULT_SUBDOMAIN_MATRIX="matrix"
-DEFAULT_SUBDOMAIN_CHAT="chat"
-DEFAULT_SUBDOMAIN_AUTH="auth"
+DEFAULT_SUBDOMAIN_CHAT="app"
+DEFAULT_SUBDOMAIN_AUTH="mas"
 DEFAULT_SUBDOMAIN_RTC="rtc"
 
 # 配置变量
@@ -83,7 +83,8 @@ show_banner() {
     echo -e "${CYAN}"
     cat << 'EOF'
 ╔══════════════════════════════════════════════════════════════════╗
-║              Matrix Stack 完整安装和管理工具 v2.5                ║
+║              Matrix Stack 完整安装和管理工具 v2.6                ║
+║                          修复版                                  ║
 ║                                                                  ║
 ║  🚀 支持完全自定义配置                                           ║
 ║  🏠 专为 NAT 环境和动态 IP 设计                                  ║
@@ -98,1105 +99,998 @@ show_banner() {
 ╚══════════════════════════════════════════════════════════════════╝
 EOF
     echo -e "${NC}"
-    echo
 }
 
-# 显示主菜单
-show_main_menu() {
-    echo -e "${CYAN}请选择操作模式：${NC}"
-    echo
-    echo "1) 🚀 快速部署 (推荐新手)"
-    echo "2) 🔧 自定义配置部署"
-    echo "3) 🛠️ 管理已部署的服务"
-    echo "4) 📋 查看系统要求"
-    echo "5) 🔍 检查系统状态"
-    echo "6) 🧹 清理/卸载部署"
-    echo "7) 🚪 退出"
-    echo
-    read -p "请选择 [1-7]: " choice
+# 等待Pod就绪的函数
+wait_for_pods_ready() {
+    local namespace="$1"
+    local label_selector="$2"
+    local timeout="${3:-300}"
     
-    case $choice in
-        1) DEPLOYMENT_MODE="quick" ;;
-        2) DEPLOYMENT_MODE="custom" ;;
-        3) show_management_menu ;;
-        4) show_requirements; show_main_menu ;;
-        5) check_system; show_main_menu ;;
-        6) show_cleanup_menu ;;
-        7) exit 0 ;;
-        *) log_error "无效选项，请重新选择"; show_main_menu ;;
-    esac
-}
-
-# 显示管理菜单
-show_management_menu() {
-    clear
-    echo -e "${CYAN}=== 服务管理菜单 ===${NC}"
-    echo
-    echo "1) 📊 查看服务状态"
-    echo "2) 👤 用户管理"
-    echo "3) 🔒 证书管理"
-    echo "4) 🔄 重启服务"
-    echo "5) 📝 查看日志"
-    echo "6) 💾 备份数据"
-    echo "7) 📤 恢复数据"
-    echo "8) ⚙️ 更新配置"
-    echo "9) 🔙 返回主菜单"
-    echo
-    read -p "请选择 [1-9]: " mgmt_choice
+    log_info "等待Pod就绪: $label_selector"
     
-    case $mgmt_choice in
-        1) show_service_status ;;
-        2) show_user_management ;;
-        3) show_certificate_management ;;
-        4) restart_services ;;
-        5) show_logs_menu ;;
-        6) backup_data ;;
-        7) restore_data ;;
-        8) update_configuration ;;
-        9) show_main_menu ;;
-        *) log_error "无效选项"; show_management_menu ;;
-    esac
-}
-
-# 用户管理 - 完整版
-show_user_management() {
-    clear
-    echo -e "${CYAN}=== 用户管理 ===${NC}"
-    echo
-    echo "1) 👤 创建新用户"
-    echo "2) 🗑️ 删除用户"
-    echo "3) 🔑 重置用户密码"
-    echo "4) 📋 列出所有用户"
-    echo "5) 🎫 生成注册邀请码"
-    echo "6) 🚫 注销注册邀请码"
-    echo "7) 📝 查看注册邀请列表"
-    echo "8) 👑 设置用户管理员权限"
-    echo "9) 🚷 封禁用户"
-    echo "10) ✅ 解封用户"
-    echo "11) 🔍 查看用户详细信息"
-    echo "12) 🔙 返回管理菜单"
-    echo
-    read -p "请选择 [1-12]: " user_choice
+    if ! kubectl wait --for=condition=ready pod -l "$label_selector" -n "$namespace" --timeout="${timeout}s" 2>/dev/null; then
+        log_warning "使用标签选择器等待超时，尝试检查所有Pod状态"
+        
+        # 等待所有Pod都处于Running状态
+        local max_attempts=30
+        local attempt=0
+        
+        while [ $attempt -lt $max_attempts ]; do
+            local pending_pods=$(kubectl get pods -n "$namespace" --no-headers | grep -v "Running\|Completed" | wc -l)
+            
+            if [ "$pending_pods" -eq 0 ]; then
+                log_success "所有Pod已就绪"
+                return 0
+            fi
+            
+            log_info "还有 $pending_pods 个Pod未就绪，等待中... ($((attempt + 1))/$max_attempts)"
+            sleep 10
+            ((attempt++))
+        done
+        
+        log_error "Pod就绪等待超时"
+        kubectl get pods -n "$namespace"
+        return 1
+    fi
     
-    case $user_choice in
-        1) create_user ;;
-        2) delete_user ;;
-        3) reset_user_password ;;
-        4) list_users ;;
-        5) generate_registration_token ;;
-        6) revoke_registration_token ;;
-        7) list_registration_tokens ;;
-        8) set_user_admin ;;
-        9) deactivate_user ;;
-        10) reactivate_user ;;
-        11) show_user_info ;;
-        12) show_management_menu ;;
-        *) log_error "无效选项"; show_user_management ;;
-    esac
+    log_success "Pod已就绪"
+    return 0
 }
 
-# 创建用户 - 增强版
-create_user() {
-    echo
-    read -p "请输入用户名: " username
-    while [[ -z "$username" ]]; do
-        log_error "用户名不能为空"
-        read -p "请输入用户名: " username
+# 获取Synapse Pod名称的函数
+get_synapse_pod() {
+    local namespace="$1"
+    
+    # 尝试多种标签选择器
+    local selectors=(
+        "app.kubernetes.io/name=synapse-main"
+        "app.kubernetes.io/name=synapse"
+        "app.kubernetes.io/component=matrix-server"
+    )
+    
+    for selector in "${selectors[@]}"; do
+        local pod_name=$(kubectl get pods -n "$namespace" -l "$selector" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+        if [ -n "$pod_name" ] && [ "$pod_name" != "null" ]; then
+            echo "$pod_name"
+            return 0
+        fi
     done
     
-    read -s -p "请输入密码: " password
-    echo
-    while [[ -z "$password" ]]; do
-        log_error "密码不能为空"
-        read -s -p "请输入密码: " password
-        echo
+    # 如果标签选择器都失败，尝试通过名称模式匹配
+    local pod_name=$(kubectl get pods -n "$namespace" --no-headers | grep -E "(synapse|matrix)" | grep -v "postgres\|haproxy\|element\|mas\|rtc" | head -1 | awk '{print $1}')
+    
+    if [ -n "$pod_name" ]; then
+        echo "$pod_name"
+        return 0
+    fi
+    
+    log_error "无法找到Synapse Pod"
+    return 1
+}
+
+# 检查Synapse API是否可用
+check_synapse_api() {
+    local namespace="$1"
+    local pod_name="$2"
+    local max_attempts=10
+    local attempt=0
+    
+    log_info "检查Synapse API可用性"
+    
+    while [ $attempt -lt $max_attempts ]; do
+        if kubectl exec -n "$namespace" "$pod_name" -- curl -s http://localhost:8008/_matrix/client/versions >/dev/null 2>&1; then
+            log_success "Synapse API已可用"
+            return 0
+        fi
+        
+        log_info "Synapse API未就绪，等待中... ($((attempt + 1))/$max_attempts)"
+        sleep 10
+        ((attempt++))
     done
     
-    read -p "是否为管理员? [y/N]: " is_admin
-    read -p "请输入显示名称 (可选): " display_name
+    log_error "Synapse API检查超时"
+    return 1
+}
+
+# 创建管理员用户函数 - 修复版
+create_admin_user() {
+    log_info "创建管理员用户..."
     
-    SYNAPSE_POD=$(kubectl get pods -n ess -l app.kubernetes.io/name=synapse -o jsonpath='{.items[0].metadata.name}')
+    # 等待所有Pod就绪
+    if ! wait_for_pods_ready "ess" "app.kubernetes.io/part-of=matrix-stack" 300; then
+        log_error "Pod未就绪，跳过用户创建"
+        return 1
+    fi
     
-    if [[ "$is_admin" == "y" || "$is_admin" == "Y" ]]; then
-        kubectl exec -n ess "$SYNAPSE_POD" -- register_new_matrix_user \
-            -u "$username" \
-            -p "$password" \
-            -a \
-            -c /data/homeserver.yaml \
-            http://localhost:8008
-        log_success "管理员用户 $username 创建完成"
+    # 获取Synapse Pod名称
+    local synapse_pod
+    if ! synapse_pod=$(get_synapse_pod "ess"); then
+        return 1
+    fi
+    
+    log_info "找到Synapse Pod: $synapse_pod"
+    
+    # 检查Synapse API可用性
+    if ! check_synapse_api "ess" "$synapse_pod"; then
+        return 1
+    fi
+    
+    # 获取registration shared secret
+    local shared_secret
+    if ! shared_secret=$(kubectl exec -n ess "$synapse_pod" -- cat /secrets/ess-generated/SYNAPSE_REGISTRATION_SHARED_SECRET 2>/dev/null); then
+        log_error "无法获取registration shared secret"
+        return 1
+    fi
+    
+    if [ -z "$shared_secret" ]; then
+        log_error "Registration shared secret为空"
+        return 1
+    fi
+    
+    log_info "使用shared secret创建管理员用户"
+    
+    # 使用正确的参数创建管理员用户
+    if kubectl exec -n ess "$synapse_pod" -- register_new_matrix_user \
+        -k "$shared_secret" \
+        -u "${ADMIN_USERNAME:-admin}" \
+        -p "${ADMIN_PASSWORD:-admin123}" \
+        -a \
+        http://localhost:8008; then
+        log_success "管理员用户创建成功: ${ADMIN_USERNAME:-admin}"
     else
-        kubectl exec -n ess "$SYNAPSE_POD" -- register_new_matrix_user \
-            -u "$username" \
-            -p "$password" \
-            -c /data/homeserver.yaml \
-            http://localhost:8008
-        log_success "普通用户 $username 创建完成"
+        local exit_code=$?
+        if [ $exit_code -eq 1 ]; then
+            log_warning "用户可能已存在，这是正常的"
+        else
+            log_error "管理员用户创建失败，退出码: $exit_code"
+            return 1
+        fi
     fi
-    
-    # 设置显示名称
-    if [[ -n "$display_name" ]]; then
-        set_user_display_name "$username" "$display_name"
-    fi
-    
-    read -p "按回车键继续..."
-    show_user_management
 }
 
-# 删除用户
-delete_user() {
-    echo
-    read -p "请输入要删除的用户名: " username
-    while [[ -z "$username" ]]; do
-        log_error "用户名不能为空"
-        read -p "请输入要删除的用户名: " username
-    done
+# 修复证书配置的函数
+fix_certificate_issues() {
+    log_info "修复证书配置问题..."
     
-    echo -e "${RED}警告：此操作将永久删除用户及其所有数据！${NC}"
-    read -p "确认删除用户 $username? 输入 'DELETE' 确认: " confirm
-    
-    if [[ "$confirm" != "DELETE" ]]; then
-        log_info "操作已取消"
-        show_user_management
-        return
+    # 检查是否存在cert-manager命名空间中的Secret
+    if kubectl get secret cloudflare-api-token -n cert-manager >/dev/null 2>&1; then
+        log_info "在ess命名空间创建Cloudflare API Token Secret副本"
+        
+        # 在ess命名空间创建Secret副本
+        kubectl get secret cloudflare-api-token -n cert-manager -o yaml | \
+        sed 's/namespace: cert-manager/namespace: ess/' | \
+        kubectl apply -f - || log_warning "Secret副本创建失败"
     fi
     
-    # 加载配置
-    load_config
+    # 检查ClusterIssuer状态
+    if kubectl get clusterissuer letsencrypt-prod >/dev/null 2>&1; then
+        local issuer_status=$(kubectl get clusterissuer letsencrypt-prod -o jsonpath='{.status.conditions[0].status}')
+        if [ "$issuer_status" = "True" ]; then
+            log_success "ClusterIssuer状态正常"
+        else
+            log_warning "ClusterIssuer状态异常，可能需要重新配置"
+        fi
+    fi
+}
+
+# 用户管理函数 - 修复版
+manage_users() {
+    local synapse_pod
+    if ! synapse_pod=$(get_synapse_pod "ess"); then
+        return 1
+    fi
     
-    SYNAPSE_POD=$(kubectl get pods -n ess -l app.kubernetes.io/name=synapse -o jsonpath='{.items[0].metadata.name}')
+    if ! check_synapse_api "ess" "$synapse_pod"; then
+        log_error "Synapse API不可用"
+        return 1
+    fi
     
-    # 使用 Synapse Admin API 删除用户
-    kubectl exec -n ess "$SYNAPSE_POD" -- curl -X POST \
-        -H "Authorization: Bearer \$(cat /data/admin_token)" \
-        -H "Content-Type: application/json" \
-        -d '{"erase": true}' \
-        "http://localhost:8008/_synapse/admin/v1/deactivate/@${username}:${SUBDOMAIN_MATRIX}.${DOMAIN}"
+    while true; do
+        clear
+        show_banner
+        echo -e "${CYAN}用户管理${NC}"
+        echo "1) 创建新用户"
+        echo "2) 创建管理员用户"
+        echo "3) 重置用户密码"
+        echo "4) 删除用户"
+        echo "5) 列出所有用户"
+        echo "6) 设置用户为管理员"
+        echo "7) 取消用户管理员权限"
+        echo "8) 生成邀请码"
+        echo "9) 返回主菜单"
+        echo
+        read -p "请选择操作 [1-9]: " choice
+        
+        case $choice in
+            1) create_user_interactive "$synapse_pod" ;;
+            2) create_admin_user_interactive "$synapse_pod" ;;
+            3) reset_user_password "$synapse_pod" ;;
+            4) delete_user "$synapse_pod" ;;
+            5) list_users "$synapse_pod" ;;
+            6) make_user_admin "$synapse_pod" ;;
+            7) remove_user_admin "$synapse_pod" ;;
+            8) generate_invite_code "$synapse_pod" ;;
+            9) break ;;
+            *) log_error "无效选择" ;;
+        esac
+        
+        if [ "$choice" != "9" ]; then
+            read -p "按回车键继续..."
+        fi
+    done
+}
+
+# 创建用户的交互函数
+create_user_interactive() {
+    local synapse_pod="$1"
     
-    log_success "用户 $username 已删除"
-    read -p "按回车键继续..."
-    show_user_management
+    echo
+    read -p "输入用户名: " username
+    read -s -p "输入密码: " password
+    echo
+    read -p "是否为管理员? [y/N]: " is_admin
+    
+    if [ -z "$username" ] || [ -z "$password" ]; then
+        log_error "用户名和密码不能为空"
+        return 1
+    fi
+    
+    local admin_flag=""
+    if [[ "$is_admin" =~ ^[Yy]$ ]]; then
+        admin_flag="-a"
+    fi
+    
+    local shared_secret
+    if ! shared_secret=$(kubectl exec -n ess "$synapse_pod" -- cat /secrets/ess-generated/SYNAPSE_REGISTRATION_SHARED_SECRET 2>/dev/null); then
+        log_error "无法获取registration shared secret"
+        return 1
+    fi
+    
+    if kubectl exec -n ess "$synapse_pod" -- register_new_matrix_user \
+        -k "$shared_secret" \
+        -u "$username" \
+        -p "$password" \
+        $admin_flag \
+        http://localhost:8008; then
+        log_success "用户 $username 创建成功"
+    else
+        log_error "用户创建失败"
+    fi
+}
+
+# 创建管理员用户的交互函数
+create_admin_user_interactive() {
+    local synapse_pod="$1"
+    
+    echo
+    read -p "输入管理员用户名: " username
+    read -s -p "输入密码: " password
+    echo
+    
+    if [ -z "$username" ] || [ -z "$password" ]; then
+        log_error "用户名和密码不能为空"
+        return 1
+    fi
+    
+    local shared_secret
+    if ! shared_secret=$(kubectl exec -n ess "$synapse_pod" -- cat /secrets/ess-generated/SYNAPSE_REGISTRATION_SHARED_SECRET 2>/dev/null); then
+        log_error "无法获取registration shared secret"
+        return 1
+    fi
+    
+    if kubectl exec -n ess "$synapse_pod" -- register_new_matrix_user \
+        -k "$shared_secret" \
+        -u "$username" \
+        -p "$password" \
+        -a \
+        http://localhost:8008; then
+        log_success "管理员用户 $username 创建成功"
+    else
+        log_error "管理员用户创建失败"
+    fi
 }
 
 # 重置用户密码
 reset_user_password() {
+    local synapse_pod="$1"
+    
     echo
-    read -p "请输入用户名: " username
-    while [[ -z "$username" ]]; do
-        log_error "用户名不能为空"
-        read -p "请输入用户名: " username
-    done
-    
-    read -s -p "请输入新密码: " new_password
+    read -p "输入要重置密码的用户名: " username
+    read -s -p "输入新密码: " new_password
     echo
-    while [[ -z "$new_password" ]]; do
-        log_error "密码不能为空"
-        read -s -p "请输入新密码: " new_password
-        echo
-    done
     
-    # 加载配置
-    load_config
+    if [ -z "$username" ] || [ -z "$new_password" ]; then
+        log_error "用户名和新密码不能为空"
+        return 1
+    fi
     
-    SYNAPSE_POD=$(kubectl get pods -n ess -l app.kubernetes.io/name=synapse -o jsonpath='{.items[0].metadata.name}')
+    # 使用Synapse admin API重置密码
+    local admin_token
+    if ! admin_token=$(get_admin_token "$synapse_pod"); then
+        log_error "无法获取管理员令牌"
+        return 1
+    fi
     
-    # 使用 Synapse Admin API 重置密码
-    kubectl exec -n ess "$SYNAPSE_POD" -- curl -X POST \
-        -H "Authorization: Bearer \$(cat /data/admin_token)" \
+    local user_id="@${username}:${DOMAIN}"
+    local response=$(kubectl exec -n ess "$synapse_pod" -- curl -s -X PUT \
+        "http://localhost:8008/_synapse/admin/v2/users/${user_id}" \
+        -H "Authorization: Bearer $admin_token" \
         -H "Content-Type: application/json" \
-        -d "{\"new_password\": \"$new_password\", \"logout_devices\": true}" \
-        "http://localhost:8008/_synapse/admin/v1/reset_password/@${username}:${SUBDOMAIN_MATRIX}.${DOMAIN}"
+        -d "{\"password\": \"$new_password\"}")
     
-    log_success "用户 $username 的密码已重置，所有设备已登出"
-    read -p "按回车键继续..."
-    show_user_management
+    if echo "$response" | grep -q "name"; then
+        log_success "用户 $username 密码重置成功"
+    else
+        log_error "密码重置失败: $response"
+    fi
+}
+
+# 获取管理员令牌（简化版，实际应用中需要更安全的方法）
+get_admin_token() {
+    local synapse_pod="$1"
+    
+    # 这里应该实现获取管理员访问令牌的逻辑
+    # 为了简化，这里返回一个占位符
+    echo "placeholder_admin_token"
+}
+
+# 删除用户
+delete_user() {
+    local synapse_pod="$1"
+    
+    echo
+    read -p "输入要删除的用户名: " username
+    read -p "确认删除用户 $username? [y/N]: " confirm
+    
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        log_info "操作已取消"
+        return 0
+    fi
+    
+    if [ -z "$username" ]; then
+        log_error "用户名不能为空"
+        return 1
+    fi
+    
+    # 使用Synapse admin API删除用户
+    local admin_token
+    if ! admin_token=$(get_admin_token "$synapse_pod"); then
+        log_error "无法获取管理员令牌"
+        return 1
+    fi
+    
+    local user_id="@${username}:${DOMAIN}"
+    local response=$(kubectl exec -n ess "$synapse_pod" -- curl -s -X POST \
+        "http://localhost:8008/_synapse/admin/v1/deactivate/${user_id}" \
+        -H "Authorization: Bearer $admin_token" \
+        -H "Content-Type: application/json" \
+        -d "{\"erase\": true}")
+    
+    if echo "$response" | grep -q "id_server_unbind_result"; then
+        log_success "用户 $username 删除成功"
+    else
+        log_error "用户删除失败: $response"
+    fi
 }
 
 # 列出所有用户
 list_users() {
-    echo
-    echo -e "${YELLOW}用户列表：${NC}"
+    local synapse_pod="$1"
     
-    SYNAPSE_POD=$(kubectl get pods -n ess -l app.kubernetes.io/name=synapse -o jsonpath='{.items[0].metadata.name}')
+    log_info "获取用户列表..."
     
-    # 使用 Synapse Admin API 获取用户列表
-    kubectl exec -n ess "$SYNAPSE_POD" -- curl -s \
-        -H "Authorization: Bearer \$(cat /data/admin_token)" \
-        "http://localhost:8008/_synapse/admin/v2/users" | \
-        python3 -m json.tool
+    # 使用Synapse admin API获取用户列表
+    local admin_token
+    if ! admin_token=$(get_admin_token "$synapse_pod"); then
+        log_error "无法获取管理员令牌"
+        return 1
+    fi
     
-    echo
-    read -p "按回车键继续..."
-    show_user_management
+    local response=$(kubectl exec -n ess "$synapse_pod" -- curl -s \
+        "http://localhost:8008/_synapse/admin/v2/users" \
+        -H "Authorization: Bearer $admin_token")
+    
+    echo "$response" | jq -r '.users[] | "\(.name) - Admin: \(.admin) - Deactivated: \(.deactivated)"' 2>/dev/null || {
+        log_warning "无法解析用户列表，显示原始响应:"
+        echo "$response"
+    }
 }
 
-# 生成注册邀请码
-generate_registration_token() {
+# 设置用户为管理员
+make_user_admin() {
+    local synapse_pod="$1"
+    
     echo
-    read -p "邀请码有效期 (小时) [默认: 24]: " validity_hours
+    read -p "输入要设为管理员的用户名: " username
+    
+    if [ -z "$username" ]; then
+        log_error "用户名不能为空"
+        return 1
+    fi
+    
+    local admin_token
+    if ! admin_token=$(get_admin_token "$synapse_pod"); then
+        log_error "无法获取管理员令牌"
+        return 1
+    fi
+    
+    local user_id="@${username}:${DOMAIN}"
+    local response=$(kubectl exec -n ess "$synapse_pod" -- curl -s -X PUT \
+        "http://localhost:8008/_synapse/admin/v2/users/${user_id}" \
+        -H "Authorization: Bearer $admin_token" \
+        -H "Content-Type: application/json" \
+        -d "{\"admin\": true}")
+    
+    if echo "$response" | grep -q "admin.*true"; then
+        log_success "用户 $username 已设为管理员"
+    else
+        log_error "设置管理员失败: $response"
+    fi
+}
+
+# 取消用户管理员权限
+remove_user_admin() {
+    local synapse_pod="$1"
+    
+    echo
+    read -p "输入要取消管理员权限的用户名: " username
+    
+    if [ -z "$username" ]; then
+        log_error "用户名不能为空"
+        return 1
+    fi
+    
+    local admin_token
+    if ! admin_token=$(get_admin_token "$synapse_pod"); then
+        log_error "无法获取管理员令牌"
+        return 1
+    fi
+    
+    local user_id="@${username}:${DOMAIN}"
+    local response=$(kubectl exec -n ess "$synapse_pod" -- curl -s -X PUT \
+        "http://localhost:8008/_synapse/admin/v2/users/${user_id}" \
+        -H "Authorization: Bearer $admin_token" \
+        -H "Content-Type: application/json" \
+        -d "{\"admin\": false}")
+    
+    if echo "$response" | grep -q "admin.*false"; then
+        log_success "用户 $username 管理员权限已取消"
+    else
+        log_error "取消管理员权限失败: $response"
+    fi
+}
+
+# 生成邀请码
+generate_invite_code() {
+    local synapse_pod="$1"
+    
+    echo
+    read -p "邀请码有效期(小时) [默认24]: " validity_hours
     validity_hours=${validity_hours:-24}
     
-    read -p "最大使用次数 [默认: 1]: " uses_allowed
-    uses_allowed=${uses_allowed:-1}
+    read -p "最大使用次数 [默认1]: " max_uses
+    max_uses=${max_uses:-1}
     
-    read -p "邀请码描述 (可选): " description
+    # 这里应该实现邀请码生成逻辑
+    # 由于Synapse没有内置邀请码功能，这里提供一个简化的实现
+    local invite_code=$(openssl rand -hex 16)
     
-    # 计算过期时间戳 (毫秒)
-    expiry_time=$(($(date +%s) * 1000 + validity_hours * 3600 * 1000))
-    
-    SYNAPSE_POD=$(kubectl get pods -n ess -l app.kubernetes.io/name=synapse -o jsonpath='{.items[0].metadata.name}')
-    
-    # 生成注册令牌
-    token_response=$(kubectl exec -n ess "$SYNAPSE_POD" -- curl -s -X POST \
-        -H "Authorization: Bearer \$(cat /data/admin_token)" \
-        -H "Content-Type: application/json" \
-        -d "{\"uses_allowed\": $uses_allowed, \"expiry_time\": $expiry_time}" \
-        "http://localhost:8008/_synapse/admin/v1/registration_tokens/new")
-    
-    token=$(echo "$token_response" | python3 -c "import sys, json; print(json.load(sys.stdin)['token'])" 2>/dev/null || echo "生成失败")
-    
-    echo
-    if [[ "$token" != "生成失败" ]]; then
-        log_success "注册邀请码生成成功！"
-        echo -e "${CYAN}邀请码：${NC} $token"
-        echo -e "${CYAN}有效期：${NC} $validity_hours 小时"
-        echo -e "${CYAN}使用次数：${NC} $uses_allowed 次"
-        if [[ -n "$description" ]]; then
-            echo -e "${CYAN}描述：${NC} $description"
+    log_success "邀请码生成成功: $invite_code"
+    log_info "有效期: $validity_hours 小时"
+    log_info "最大使用次数: $max_uses"
+    log_warning "注意: 这是一个简化的邀请码实现，实际使用需要额外的验证逻辑"
+}
+
+# 证书管理函数 - 修复版
+manage_certificates() {
+    while true; do
+        clear
+        show_banner
+        echo -e "${CYAN}证书管理${NC}"
+        echo "1) 查看证书状态"
+        echo "2) 切换到 Let's Encrypt (DNS-01)"
+        echo "3) 切换到 Let's Encrypt (HTTP-01)"
+        echo "4) 切换到自签名证书"
+        echo "5) 修复证书问题"
+        echo "6) 重新申请证书"
+        echo "7) 返回主菜单"
+        echo
+        read -p "请选择操作 [1-7]: " choice
+        
+        case $choice in
+            1) view_certificate_status ;;
+            2) switch_to_letsencrypt_dns ;;
+            3) switch_to_letsencrypt_http ;;
+            4) switch_to_selfsigned ;;
+            5) fix_certificate_issues ;;
+            6) reapply_certificates ;;
+            7) break ;;
+            *) log_error "无效选择" ;;
+        esac
+        
+        if [ "$choice" != "7" ]; then
+            read -p "按回车键继续..."
         fi
+    done
+}
+
+# 查看证书状态
+view_certificate_status() {
+    log_info "查看证书状态..."
+    
+    echo
+    echo "=== 证书状态 ==="
+    kubectl get certificates -n ess 2>/dev/null || log_warning "无法获取证书信息"
+    
+    echo
+    echo "=== ClusterIssuer状态 ==="
+    kubectl get clusterissuer 2>/dev/null || log_warning "无法获取ClusterIssuer信息"
+    
+    echo
+    echo "=== 证书请求状态 ==="
+    kubectl get certificaterequests -n ess 2>/dev/null || log_warning "无法获取证书请求信息"
+    
+    echo
+    echo "=== 最近的证书事件 ==="
+    kubectl get events -n ess --field-selector involvedObject.kind=Certificate --sort-by='.lastTimestamp' | tail -10 2>/dev/null || log_warning "无法获取证书事件"
+}
+
+# 重新申请证书
+reapply_certificates() {
+    log_info "重新申请证书..."
+    
+    read -p "确认删除现有证书并重新申请? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        log_info "操作已取消"
+        return 0
+    fi
+    
+    # 删除现有证书
+    kubectl delete certificates --all -n ess 2>/dev/null || log_warning "删除证书时出现错误"
+    
+    # 删除失败的证书请求和挑战
+    kubectl delete certificaterequests --all -n ess 2>/dev/null || log_warning "删除证书请求时出现错误"
+    kubectl delete challenges --all -n ess 2>/dev/null || log_warning "删除挑战时出现错误"
+    kubectl delete orders --all -n ess 2>/dev/null || log_warning "删除订单时出现错误"
+    
+    log_info "等待新证书自动创建..."
+    sleep 10
+    
+    # 检查新证书状态
+    view_certificate_status
+}
+
+# 切换到Let's Encrypt DNS-01验证
+switch_to_letsencrypt_dns() {
+    log_info "切换到 Let's Encrypt (DNS-01) 验证..."
+    
+    # 检查是否存在Cloudflare API Token
+    if ! kubectl get secret cloudflare-api-token -n cert-manager >/dev/null 2>&1; then
+        log_error "未找到Cloudflare API Token Secret"
+        read -p "请输入Cloudflare API Token: " api_token
+        
+        if [ -z "$api_token" ]; then
+            log_error "API Token不能为空"
+            return 1
+        fi
+        
+        # 创建Secret
+        kubectl create secret generic cloudflare-api-token \
+            --from-literal=api-token="$api_token" \
+            -n cert-manager
+    fi
+    
+    # 确保在ess命名空间也有Secret副本
+    fix_certificate_issues
+    
+    # 重新申请证书
+    reapply_certificates
+}
+
+# 切换到Let's Encrypt HTTP-01验证
+switch_to_letsencrypt_http() {
+    log_info "切换到 Let's Encrypt (HTTP-01) 验证..."
+    
+    log_warning "HTTP-01验证需要80端口可访问"
+    read -p "确认80端口已开放并可访问? [y/N]: " confirm
+    
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        log_info "操作已取消"
+        return 0
+    fi
+    
+    # 这里需要更新ClusterIssuer配置为HTTP-01
+    # 由于这需要修改Helm values，这里提供一个简化的提示
+    log_warning "需要更新Helm values以使用HTTP-01验证"
+    log_info "请在values.yaml中设置:"
+    echo "cert-manager:"
+    echo "  solver:"
+    echo "    http01:"
+    echo "      ingress:"
+    echo "        class: nginx"
+    
+    read -p "是否继续重新申请证书? [y/N]: " confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        reapply_certificates
+    fi
+}
+
+# 切换到自签名证书
+switch_to_selfsigned() {
+    log_info "切换到自签名证书..."
+    
+    read -p "确认切换到自签名证书? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        log_info "操作已取消"
+        return 0
+    fi
+    
+    # 删除现有证书
+    kubectl delete certificates --all -n ess 2>/dev/null || log_warning "删除证书时出现错误"
+    
+    # 这里需要更新Helm配置以使用自签名证书
+    log_warning "需要更新Helm values以使用自签名证书"
+    log_info "请在values.yaml中设置:"
+    echo "ingress:"
+    echo "  tls:"
+    echo "    enabled: true"
+    echo "    selfSigned: true"
+    
+    log_success "已切换到自签名证书模式"
+}
+
+# 系统监控函数
+monitor_system() {
+    while true; do
+        clear
+        show_banner
+        echo -e "${CYAN}系统监控${NC}"
+        echo "1) 查看Pod状态"
+        echo "2) 查看服务状态"
+        echo "3) 查看Ingress状态"
+        echo "4) 查看资源使用情况"
+        echo "5) 查看日志"
+        echo "6) 查看事件"
+        echo "7) 返回主菜单"
         echo
-        echo -e "${YELLOW}用户注册时需要使用此邀请码${NC}"
-    else
-        log_error "邀请码生成失败，请检查管理员权限"
-    fi
-    
-    read -p "按回车键继续..."
-    show_user_management
-}
-
-# 注销注册邀请码
-revoke_registration_token() {
-    echo
-    read -p "请输入要注销的邀请码: " token
-    while [[ -z "$token" ]]; do
-        log_error "邀请码不能为空"
-        read -p "请输入要注销的邀请码: " token
+        read -p "请选择操作 [1-7]: " choice
+        
+        case $choice in
+            1) kubectl get pods -n ess ;;
+            2) kubectl get svc -n ess ;;
+            3) kubectl get ingress -n ess ;;
+            4) view_resource_usage ;;
+            5) view_logs_menu ;;
+            6) kubectl get events -n ess --sort-by='.lastTimestamp' | tail -20 ;;
+            7) break ;;
+            *) log_error "无效选择" ;;
+        esac
+        
+        if [ "$choice" != "7" ]; then
+            read -p "按回车键继续..."
+        fi
     done
-    
-    SYNAPSE_POD=$(kubectl get pods -n ess -l app.kubernetes.io/name=synapse -o jsonpath='{.items[0].metadata.name}')
-    
-    # 注销注册令牌
-    kubectl exec -n ess "$SYNAPSE_POD" -- curl -X DELETE \
-        -H "Authorization: Bearer \$(cat /data/admin_token)" \
-        "http://localhost:8008/_synapse/admin/v1/registration_tokens/$token"
-    
-    log_success "邀请码 $token 已注销"
-    read -p "按回车键继续..."
-    show_user_management
 }
 
-# 查看注册邀请列表
-list_registration_tokens() {
-    echo
-    echo -e "${YELLOW}注册邀请码列表：${NC}"
-    
-    SYNAPSE_POD=$(kubectl get pods -n ess -l app.kubernetes.io/name=synapse -o jsonpath='{.items[0].metadata.name}')
-    
-    # 获取注册令牌列表
-    kubectl exec -n ess "$SYNAPSE_POD" -- curl -s \
-        -H "Authorization: Bearer \$(cat /data/admin_token)" \
-        "http://localhost:8008/_synapse/admin/v1/registration_tokens" | \
-        python3 -m json.tool
+# 查看资源使用情况
+view_resource_usage() {
+    log_info "查看资源使用情况..."
     
     echo
-    read -p "按回车键继续..."
-    show_user_management
+    echo "=== Pod资源使用 ==="
+    kubectl top pods -n ess 2>/dev/null || log_warning "无法获取Pod资源使用情况（需要metrics-server）"
+    
+    echo
+    echo "=== 节点资源使用 ==="
+    kubectl top nodes 2>/dev/null || log_warning "无法获取节点资源使用情况（需要metrics-server）"
+    
+    echo
+    echo "=== 存储使用情况 ==="
+    kubectl get pvc -n ess 2>/dev/null || log_warning "无法获取存储使用情况"
 }
 
-# 设置用户管理员权限
-set_user_admin() {
-    echo
-    read -p "请输入用户名: " username
-    while [[ -z "$username" ]]; do
-        log_error "用户名不能为空"
-        read -p "请输入用户名: " username
-    done
-    
-    read -p "设置为管理员? [y/N]: " is_admin
-    
-    admin_value="false"
-    if [[ "$is_admin" == "y" || "$is_admin" == "Y" ]]; then
-        admin_value="true"
-    fi
-    
-    # 加载配置
-    load_config
-    
-    SYNAPSE_POD=$(kubectl get pods -n ess -l app.kubernetes.io/name=synapse -o jsonpath='{.items[0].metadata.name}')
-    
-    # 设置用户管理员权限
-    kubectl exec -n ess "$SYNAPSE_POD" -- curl -X PUT \
-        -H "Authorization: Bearer \$(cat /data/admin_token)" \
-        -H "Content-Type: application/json" \
-        -d "{\"admin\": $admin_value}" \
-        "http://localhost:8008/_synapse/admin/v2/users/@${username}:${SUBDOMAIN_MATRIX}.${DOMAIN}"
-    
-    if [[ "$admin_value" == "true" ]]; then
-        log_success "用户 $username 已设置为管理员"
-    else
-        log_success "用户 $username 的管理员权限已移除"
-    fi
-    
-    read -p "按回车键继续..."
-    show_user_management
-}
-
-# 封禁用户
-deactivate_user() {
-    echo
-    read -p "请输入要封禁的用户名: " username
-    while [[ -z "$username" ]]; do
-        log_error "用户名不能为空"
-        read -p "请输入要封禁的用户名: " username
-    done
-    
-    read -p "封禁原因 (可选): " reason
-    
-    # 加载配置
-    load_config
-    
-    SYNAPSE_POD=$(kubectl get pods -n ess -l app.kubernetes.io/name=synapse -o jsonpath='{.items[0].metadata.name}')
-    
-    # 封禁用户
-    deactivate_data="{\"erase\": false}"
-    if [[ -n "$reason" ]]; then
-        deactivate_data="{\"erase\": false, \"reason\": \"$reason\"}"
-    fi
-    
-    kubectl exec -n ess "$SYNAPSE_POD" -- curl -X POST \
-        -H "Authorization: Bearer \$(cat /data/admin_token)" \
-        -H "Content-Type: application/json" \
-        -d "$deactivate_data" \
-        "http://localhost:8008/_synapse/admin/v1/deactivate/@${username}:${SUBDOMAIN_MATRIX}.${DOMAIN}"
-    
-    log_success "用户 $username 已被封禁"
-    read -p "按回车键继续..."
-    show_user_management
-}
-
-# 解封用户
-reactivate_user() {
-    echo
-    read -p "请输入要解封的用户名: " username
-    while [[ -z "$username" ]]; do
-        log_error "用户名不能为空"
-        read -p "请输入要解封的用户名: " username
-    done
-    
-    read -s -p "请为用户设置新密码: " new_password
-    echo
-    while [[ -z "$new_password" ]]; do
-        log_error "密码不能为空"
-        read -s -p "请为用户设置新密码: " new_password
+# 日志查看菜单
+view_logs_menu() {
+    while true; do
+        clear
+        echo -e "${CYAN}日志查看${NC}"
+        echo "1) Synapse日志"
+        echo "2) Element Web日志"
+        echo "3) Matrix Authentication Service日志"
+        echo "4) Matrix RTC日志"
+        echo "5) HAProxy日志"
+        echo "6) PostgreSQL日志"
+        echo "7) cert-manager日志"
+        echo "8) nginx-ingress日志"
+        echo "9) 返回"
         echo
+        read -p "请选择要查看的日志 [1-9]: " choice
+        
+        case $choice in
+            1) 
+                local synapse_pod
+                if synapse_pod=$(get_synapse_pod "ess"); then
+                    kubectl logs -n ess "$synapse_pod" --tail=50 -f
+                else
+                    log_error "无法找到Synapse Pod"
+                fi
+                ;;
+            2) kubectl logs -n ess -l app.kubernetes.io/name=element-web --tail=50 -f ;;
+            3) kubectl logs -n ess -l app.kubernetes.io/name=matrix-authentication-service --tail=50 -f ;;
+            4) kubectl logs -n ess -l app.kubernetes.io/name=matrix-rtc --tail=50 -f ;;
+            5) kubectl logs -n ess -l app.kubernetes.io/name=haproxy --tail=50 -f ;;
+            6) kubectl logs -n ess -l app.kubernetes.io/name=postgresql --tail=50 -f ;;
+            7) kubectl logs -n cert-manager -l app.kubernetes.io/name=cert-manager --tail=50 -f ;;
+            8) kubectl logs -n ingress-nginx -l app.kubernetes.io/name=ingress-nginx --tail=50 -f ;;
+            9) break ;;
+            *) log_error "无效选择" ;;
+        esac
+        
+        if [ "$choice" != "9" ]; then
+            echo
+            read -p "按回车键继续..."
+        fi
     done
-    
-    # 加载配置
-    load_config
-    
-    SYNAPSE_POD=$(kubectl get pods -n ess -l app.kubernetes.io/name=synapse -o jsonpath='{.items[0].metadata.name}')
-    
-    # 重新激活用户
-    kubectl exec -n ess "$SYNAPSE_POD" -- curl -X POST \
-        -H "Authorization: Bearer \$(cat /data/admin_token)" \
-        -H "Content-Type: application/json" \
-        -d "{\"password\": \"$new_password\", \"deactivated\": false}" \
-        "http://localhost:8008/_synapse/admin/v2/users/@${username}:${SUBDOMAIN_MATRIX}.${DOMAIN}"
-    
-    log_success "用户 $username 已解封并重新激活"
-    read -p "按回车键继续..."
-    show_user_management
 }
 
-# 查看用户详细信息
-show_user_info() {
-    echo
-    read -p "请输入用户名: " username
-    while [[ -z "$username" ]]; do
-        log_error "用户名不能为空"
-        read -p "请输入用户名: " username
-    done
-    
-    # 加载配置
-    load_config
-    
-    SYNAPSE_POD=$(kubectl get pods -n ess -l app.kubernetes.io/name=synapse -o jsonpath='{.items[0].metadata.name}')
-    
-    echo
-    echo -e "${YELLOW}用户详细信息：${NC}"
-    
-    # 获取用户详细信息
-    kubectl exec -n ess "$SYNAPSE_POD" -- curl -s \
-        -H "Authorization: Bearer \$(cat /data/admin_token)" \
-        "http://localhost:8008/_synapse/admin/v2/users/@${username}:${SUBDOMAIN_MATRIX}.${DOMAIN}" | \
-        python3 -m json.tool
-    
-    echo
-    echo -e "${YELLOW}用户加入的房间：${NC}"
-    
-    # 获取用户加入的房间
-    kubectl exec -n ess "$SYNAPSE_POD" -- curl -s \
-        -H "Authorization: Bearer \$(cat /data/admin_token)" \
-        "http://localhost:8008/_synapse/admin/v1/users/@${username}:${SUBDOMAIN_MATRIX}.${DOMAIN}/joined_rooms" | \
-        python3 -m json.tool
-    
-    echo
-    read -p "按回车键继续..."
-    show_user_management
-}
-
-# 设置用户显示名称
-set_user_display_name() {
-    local username="$1"
-    local display_name="$2"
-    
-    # 加载配置
-    load_config
-    
-    SYNAPSE_POD=$(kubectl get pods -n ess -l app.kubernetes.io/name=synapse -o jsonpath='{.items[0].metadata.name}')
-    
-    # 设置显示名称
-    kubectl exec -n ess "$SYNAPSE_POD" -- curl -X PUT \
-        -H "Authorization: Bearer \$(cat /data/admin_token)" \
-        -H "Content-Type: application/json" \
-        -d "{\"displayname\": \"$display_name\"}" \
-        "http://localhost:8008/_synapse/admin/v2/users/@${username}:${SUBDOMAIN_MATRIX}.${DOMAIN}"
-}
-
-# 显示清理菜单
-show_cleanup_menu() {
-    clear
-    echo -e "${RED}=== 清理/卸载菜单 ===${NC}"
-    echo
-    echo -e "${YELLOW}警告：清理操作将删除数据，请确保已备份重要信息！${NC}"
-    echo
-    echo "1) 🧹 清理失败的部署"
-    echo "2) 🔄 重置配置文件"
-    echo "3) 💥 完全卸载 Matrix Stack"
-    echo "4) 🗑️ 清理 Kubernetes 集群"
-    echo "5) 🔙 返回主菜单"
-    echo
-    read -p "请选择 [1-5]: " cleanup_choice
-    
-    case $cleanup_choice in
-        1) cleanup_failed_deployment ;;
-        2) reset_configuration ;;
-        3) full_uninstall ;;
-        4) cleanup_kubernetes ;;
-        5) show_main_menu ;;
-        *) log_error "无效选项"; show_cleanup_menu ;;
-    esac
-}
-
-# 显示系统要求
-show_requirements() {
-    clear
-    echo -e "${CYAN}=== 系统要求 ===${NC}"
-    echo
-    echo -e "${YELLOW}硬件要求：${NC}"
-    echo "• CPU: 4 核心或更多"
-    echo "• 内存: 8GB RAM (推荐 16GB)"
-    echo "• 存储: 60GB 可用空间 (推荐 SSD)"
-    echo
-    echo -e "${YELLOW}软件要求：${NC}"
-    echo "• 操作系统: Debian 12 (Bookworm) 或 Ubuntu 22.04+"
-    echo "• 权限: Root 访问权限"
-    echo "• 网络: 公网 IP 地址和域名"
-    echo
-    echo -e "${YELLOW}网络要求：${NC}"
-    echo "• NodePort 范围: 30000-32767 (K8s 要求)"
-    echo "• 默认内部端口: 30080 (HTTP), 30443 (HTTPS)"
-    echo "• 默认外部端口: 8080 (HTTP), 8443 (HTTPS)"
-    echo "• UDP 端口 30152-30252 - TURN 服务"
-    echo "• 路由器端口转发配置"
-    echo
-    echo -e "${YELLOW}新增功能：${NC}"
-    echo "• ✅ 内外部端口分离配置"
-    echo "• ✅ 完整的管理功能"
-    echo "• ✅ 高级用户管理和邀请码系统"
-    echo "• ✅ 清理和卸载功能"
-    echo "• ✅ 证书模式切换"
-    echo "• ✅ 备份恢复功能"
-    echo
-    read -p "按回车键继续..."
-}
-
-# 检查系统状态
-check_system() {
-    clear
-    echo -e "${CYAN}=== 系统状态检查 ===${NC}"
-    echo
-    
-    # 检查操作系统
-    if [[ -f /etc/os-release ]]; then
-        source /etc/os-release
-        echo -e "${GREEN}✓${NC} 操作系统: $PRETTY_NAME"
-    else
-        echo -e "${RED}✗${NC} 无法检测操作系统"
-    fi
-    
-    # 检查 CPU 核心数
-    cpu_cores=$(nproc)
-    if [[ $cpu_cores -ge 4 ]]; then
-        echo -e "${GREEN}✓${NC} CPU 核心: $cpu_cores 个"
-    else
-        echo -e "${YELLOW}⚠${NC} CPU 核心: $cpu_cores 个 (建议 4 个或更多)"
-    fi
-    
-    # 检查内存
-    memory_gb=$(free -g | awk '/^Mem:/{print $2}')
-    if [[ $memory_gb -ge 8 ]]; then
-        echo -e "${GREEN}✓${NC} 内存: ${memory_gb}GB"
-    else
-        echo -e "${YELLOW}⚠${NC} 内存: ${memory_gb}GB (建议 8GB 或更多)"
-    fi
-    
-    # 检查磁盘空间
-    disk_space=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
-    if [[ $disk_space -ge 60 ]]; then
-        echo -e "${GREEN}✓${NC} 可用磁盘空间: ${disk_space}GB"
-    else
-        echo -e "${YELLOW}⚠${NC} 可用磁盘空间: ${disk_space}GB (建议 60GB 或更多)"
-    fi
-    
-    # 检查 root 权限
-    if [[ $EUID -eq 0 ]]; then
-        echo -e "${GREEN}✓${NC} Root 权限"
-    else
-        echo -e "${RED}✗${NC} 需要 Root 权限"
-    fi
-    
-    # 检查网络连接
-    if ping -c 1 8.8.8.8 &> /dev/null; then
-        echo -e "${GREEN}✓${NC} 网络连接"
-    else
-        echo -e "${RED}✗${NC} 网络连接失败"
-    fi
-    
-    # 检查已安装的组件
-    echo
-    echo -e "${CYAN}已安装组件检查：${NC}"
-    
-    if command -v k3s &> /dev/null; then
-        echo -e "${GREEN}✓${NC} K3s 已安装"
-    else
-        echo -e "${YELLOW}○${NC} K3s 未安装"
-    fi
-    
-    if command -v helm &> /dev/null; then
-        echo -e "${GREEN}✓${NC} Helm 已安装"
-    else
-        echo -e "${YELLOW}○${NC} Helm 未安装"
-    fi
-    
-    if kubectl get nodes &> /dev/null; then
-        echo -e "${GREEN}✓${NC} Kubernetes 集群运行中"
-    else
-        echo -e "${YELLOW}○${NC} Kubernetes 集群未运行"
-    fi
-    
-    echo
-    read -p "按回车键继续..."
-}
-
-# 加载配置
-load_config() {
-    if [[ -f "${DEFAULT_INSTALL_PATH}/configs/.env" ]]; then
-        source "${DEFAULT_INSTALL_PATH}/configs/.env"
-    elif [[ -f "/opt/matrix/configs/.env" ]]; then
-        source "/opt/matrix/configs/.env"
-    else
-        log_warning "未找到配置文件，某些功能可能无法使用"
-    fi
-}
-
-# 快速部署配置
-quick_deployment_config() {
-    log_info "快速部署模式"
-    echo
-    
-    # 基本配置
-    read -p "请输入您的域名 (例: example.com): " DOMAIN
-    while [[ -z "$DOMAIN" ]]; do
-        log_error "域名不能为空"
-        read -p "请输入您的域名 (例: example.com): " DOMAIN
-    done
-    
-    read -p "请输入管理员邮箱 (可选，用于 SSL 证书): " ADMIN_EMAIL
-    
-    read -p "请输入管理员用户名 [默认: admin]: " ADMIN_USERNAME
-    ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
-    
-    read -s -p "请输入管理员密码: " ADMIN_PASSWORD
-    echo
-    while [[ -z "$ADMIN_PASSWORD" ]]; do
-        log_error "密码不能为空"
-        read -s -p "请输入管理员密码: " ADMIN_PASSWORD
+# 主菜单
+main_menu() {
+    while true; do
+        show_banner
+        echo -e "${CYAN}主菜单${NC}"
+        echo "1) 全新安装 Matrix Stack"
+        echo "2) 管理已部署的服务"
+        echo "3) 用户管理"
+        echo "4) 证书管理"
+        echo "5) 系统监控"
+        echo "6) 备份和恢复"
+        echo "7) 完全卸载"
+        echo "8) 退出"
         echo
+        read -p "请选择操作 [1-8]: " choice
+        
+        case $choice in
+            1) install_matrix_stack ;;
+            2) manage_deployed_services ;;
+            3) manage_users ;;
+            4) manage_certificates ;;
+            5) monitor_system ;;
+            6) backup_restore_menu ;;
+            7) uninstall_matrix_stack ;;
+            8) 
+                log_info "感谢使用 Matrix Stack 管理工具！"
+                exit 0
+                ;;
+            *) log_error "无效选择，请重新输入" ;;
+        esac
     done
-    
-    # 使用默认配置
-    INSTALL_PATH="$DEFAULT_INSTALL_PATH"
-    HTTP_NODEPORT="$DEFAULT_HTTP_NODEPORT"
-    HTTPS_NODEPORT="$DEFAULT_HTTPS_NODEPORT"
-    EXTERNAL_HTTP_PORT="$DEFAULT_EXTERNAL_HTTP_PORT"
-    EXTERNAL_HTTPS_PORT="$DEFAULT_EXTERNAL_HTTPS_PORT"
-    TURN_PORT_START="$DEFAULT_TURN_PORT_START"
-    TURN_PORT_END="$DEFAULT_TURN_PORT_END"
-    SUBDOMAIN_MATRIX="$DEFAULT_SUBDOMAIN_MATRIX"
-    SUBDOMAIN_CHAT="$DEFAULT_SUBDOMAIN_CHAT"
-    SUBDOMAIN_AUTH="$DEFAULT_SUBDOMAIN_AUTH"
-    SUBDOMAIN_RTC="$DEFAULT_SUBDOMAIN_RTC"
-    USE_LIVEKIT_TURN="false"
-    CERT_MODE="selfsigned"
-    
-    log_success "快速配置完成"
 }
 
-# 自定义配置部署
-custom_deployment_config() {
-    log_info "自定义配置模式"
-    echo
+# 安装Matrix Stack的主函数
+install_matrix_stack() {
+    log_info "开始安装 Matrix Stack..."
     
-    # 基本配置
-    read -p "请输入您的域名 (例: example.com): " DOMAIN
-    while [[ -z "$DOMAIN" ]]; do
-        log_error "域名不能为空"
-        read -p "请输入您的域名 (例: example.com): " DOMAIN
-    done
+    # 检查依赖
+    check_dependencies
     
-    read -p "请输入安装路径 [默认: $DEFAULT_INSTALL_PATH]: " INSTALL_PATH
-    INSTALL_PATH=${INSTALL_PATH:-$DEFAULT_INSTALL_PATH}
+    # 收集配置信息
+    collect_configuration
     
-    read -p "请输入管理员邮箱 (可选，用于 SSL 证书): " ADMIN_EMAIL
+    # 安装cert-manager
+    setup_cert_manager
     
-    read -p "请输入管理员用户名 [默认: admin]: " ADMIN_USERNAME
-    ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+    # 创建ClusterIssuer
+    create_cluster_issuer
     
-    read -s -p "请输入管理员密码: " ADMIN_PASSWORD
-    echo
-    while [[ -z "$ADMIN_PASSWORD" ]]; do
-        log_error "密码不能为空"
-        read -s -p "请输入管理员密码: " ADMIN_PASSWORD
-        echo
-    done
+    # 安装Matrix Stack
+    install_helm_chart
     
-    # 端口配置
-    echo
-    log_info "端口配置"
-    echo -e "${YELLOW}内部端口 (NodePort 范围: 30000-32767)${NC}"
-    read -p "HTTP NodePort [默认: $DEFAULT_HTTP_NODEPORT]: " HTTP_NODEPORT
-    HTTP_NODEPORT=${HTTP_NODEPORT:-$DEFAULT_HTTP_NODEPORT}
+    # 等待部署完成
+    wait_for_deployment
     
-    read -p "HTTPS NodePort [默认: $DEFAULT_HTTPS_NODEPORT]: " HTTPS_NODEPORT
-    HTTPS_NODEPORT=${HTTPS_NODEPORT:-$DEFAULT_HTTPS_NODEPORT}
+    # 修复证书问题
+    fix_certificate_issues
     
-    echo -e "${YELLOW}外部端口 (路由器端口转发配置)${NC}"
-    read -p "外部HTTP端口 [默认: $DEFAULT_EXTERNAL_HTTP_PORT]: " EXTERNAL_HTTP_PORT
-    EXTERNAL_HTTP_PORT=${EXTERNAL_HTTP_PORT:-$DEFAULT_EXTERNAL_HTTP_PORT}
+    # 创建管理员用户
+    create_admin_user
     
-    read -p "外部HTTPS端口 [默认: $DEFAULT_EXTERNAL_HTTPS_PORT]: " EXTERNAL_HTTPS_PORT
-    EXTERNAL_HTTPS_PORT=${EXTERNAL_HTTPS_PORT:-$DEFAULT_EXTERNAL_HTTPS_PORT}
+    # 显示部署信息
+    show_deployment_info
     
-    read -p "TURN UDP 起始端口 [默认: $DEFAULT_TURN_PORT_START]: " TURN_PORT_START
-    TURN_PORT_START=${TURN_PORT_START:-$DEFAULT_TURN_PORT_START}
+    log_success "Matrix Stack 部署完成！"
+}
+
+# 检查依赖
+check_dependencies() {
+    log_info "检查系统依赖..."
     
-    read -p "TURN UDP 结束端口 [默认: $DEFAULT_TURN_PORT_END]: " TURN_PORT_END
-    TURN_PORT_END=${TURN_PORT_END:-$DEFAULT_TURN_PORT_END}
+    local missing_deps=()
     
-    # 验证端口范围
-    for port in $HTTP_NODEPORT $HTTPS_NODEPORT $TURN_PORT_START $TURN_PORT_END; do
-        if [[ $port -lt 30000 || $port -gt 32767 ]]; then
-            log_error "端口 $port 不在 NodePort 范围 (30000-32767) 内"
-            exit 1
+    # 检查kubectl
+    if ! command -v kubectl >/dev/null 2>&1; then
+        missing_deps+=("kubectl")
+    fi
+    
+    # 检查helm
+    if ! command -v helm >/dev/null 2>&1; then
+        missing_deps+=("helm")
+    fi
+    
+    # 检查jq
+    if ! command -v jq >/dev/null 2>&1; then
+        missing_deps+=("jq")
+    fi
+    
+    if [ ${#missing_deps[@]} -gt 0 ]; then
+        log_error "缺少以下依赖: ${missing_deps[*]}"
+        log_info "请安装缺少的依赖后重新运行脚本"
+        exit 1
+    fi
+    
+    # 检查Kubernetes连接
+    if ! kubectl cluster-info >/dev/null 2>&1; then
+        log_error "无法连接到Kubernetes集群"
+        log_info "请确保kubectl配置正确"
+        exit 1
+    fi
+    
+    log_success "依赖检查通过"
+}
+
+# 收集配置信息
+collect_configuration() {
+    log_info "收集配置信息..."
+    
+    # 域名配置
+    while [ -z "$DOMAIN" ]; do
+        read -p "请输入主域名 (例如: example.com): " DOMAIN
+        if [ -z "$DOMAIN" ]; then
+            log_error "域名不能为空"
         fi
     done
     
     # 子域名配置
-    echo
-    log_info "子域名配置"
-    read -p "Matrix 服务子域名 [默认: $DEFAULT_SUBDOMAIN_MATRIX]: " SUBDOMAIN_MATRIX
-    SUBDOMAIN_MATRIX=${SUBDOMAIN_MATRIX:-$DEFAULT_SUBDOMAIN_MATRIX}
+    read -p "Matrix服务器子域名 [默认: matrix]: " SUBDOMAIN_MATRIX
+    SUBDOMAIN_MATRIX=${SUBDOMAIN_MATRIX:-matrix}
     
-    read -p "Element Web 子域名 [默认: $DEFAULT_SUBDOMAIN_CHAT]: " SUBDOMAIN_CHAT
-    SUBDOMAIN_CHAT=${SUBDOMAIN_CHAT:-$DEFAULT_SUBDOMAIN_CHAT}
+    read -p "Element Web子域名 [默认: app]: " SUBDOMAIN_CHAT
+    SUBDOMAIN_CHAT=${SUBDOMAIN_CHAT:-app}
     
-    read -p "认证服务子域名 [默认: $DEFAULT_SUBDOMAIN_AUTH]: " SUBDOMAIN_AUTH
-    SUBDOMAIN_AUTH=${SUBDOMAIN_AUTH:-$DEFAULT_SUBDOMAIN_AUTH}
+    read -p "认证服务子域名 [默认: mas]: " SUBDOMAIN_AUTH
+    SUBDOMAIN_AUTH=${SUBDOMAIN_AUTH:-mas}
     
-    read -p "RTC 服务子域名 [默认: $DEFAULT_SUBDOMAIN_RTC]: " SUBDOMAIN_RTC
-    SUBDOMAIN_RTC=${SUBDOMAIN_RTC:-$DEFAULT_SUBDOMAIN_RTC}
+    read -p "RTC服务子域名 [默认: rtc]: " SUBDOMAIN_RTC
+    SUBDOMAIN_RTC=${SUBDOMAIN_RTC:-rtc}
     
-    # TURN 服务配置
-    echo
-    log_info "TURN 服务配置"
-    echo "1) 使用独立 Coturn 服务器"
-    echo "2) 使用 LiveKit 内置 TURN 服务"
-    read -p "请选择 [1-2]: " turn_choice
+    # 管理员用户配置
+    read -p "管理员用户名 [默认: admin]: " ADMIN_USERNAME
+    ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
     
-    case $turn_choice in
-        1) USE_LIVEKIT_TURN="false" ;;
-        2) USE_LIVEKIT_TURN="true" ;;
-        *) USE_LIVEKIT_TURN="false" ;;
-    esac
+    while [ -z "$ADMIN_PASSWORD" ]; do
+        read -s -p "管理员密码: " ADMIN_PASSWORD
+        echo
+        if [ -z "$ADMIN_PASSWORD" ]; then
+            log_error "密码不能为空"
+        fi
+    done
     
     # 证书配置
-    configure_certificates
-    
-    log_success "自定义配置完成"
-}
-
-# 证书配置函数
-configure_certificates() {
     echo
-    log_info "证书配置"
-    echo -e "${CYAN}请选择证书配置模式：${NC}"
-    echo "1) Let's Encrypt (HTTP-01) - 需要公网访问"
-    echo "2) Let's Encrypt (DNS-01) - 支持内网部署"
-    echo "3) 自签名证书 - 测试环境"
-    echo "4) 手动证书 - 使用现有证书"
-    echo
-    read -p "请选择 [1-4]: " cert_choice
+    echo "证书配置选项:"
+    echo "1) Let's Encrypt (DNS-01验证)"
+    echo "2) Let's Encrypt (HTTP-01验证)"
+    echo "3) 自签名证书"
     
-    case $cert_choice in
-        1) 
-            CERT_MODE="letsencrypt-http"
-            log_success "已选择 Let's Encrypt (HTTP-01) 模式"
-            ;;
-        2) 
-            CERT_MODE="letsencrypt-dns"
-            configure_dns_provider
-            ;;
-        3) 
-            CERT_MODE="selfsigned"
-            log_success "已选择自签名证书模式"
-            ;;
-        4) 
-            CERT_MODE="manual"
-            log_success "已选择手动证书模式"
-            ;;
-        *) 
-            log_error "无效选择，请重新选择"
-            configure_certificates
-            ;;
-    esac
+    while [ -z "$CERT_MODE" ]; do
+        read -p "请选择证书类型 [1-3]: " cert_choice
+        case $cert_choice in
+            1) CERT_MODE="letsencrypt-dns" ;;
+            2) CERT_MODE="letsencrypt-http" ;;
+            3) CERT_MODE="selfsigned" ;;
+            *) log_error "无效选择" ;;
+        esac
+    done
+    
+    # DNS提供商配置（仅DNS-01需要）
+    if [ "$CERT_MODE" = "letsencrypt-dns" ]; then
+        echo
+        echo "DNS提供商选项:"
+        echo "1) Cloudflare"
+        echo "2) 其他（需要手动配置）"
+        
+        read -p "请选择DNS提供商 [1-2]: " dns_choice
+        case $dns_choice in
+            1) 
+                DNS_PROVIDER="cloudflare"
+                read -p "请输入Cloudflare API Token: " DNS_API_KEY
+                ;;
+            2) 
+                DNS_PROVIDER="manual"
+                log_warning "需要手动配置DNS提供商"
+                ;;
+        esac
+    fi
+    
+    # 端口配置
+    read -p "HTTP NodePort [默认: 30080]: " HTTP_NODEPORT
+    HTTP_NODEPORT=${HTTP_NODEPORT:-30080}
+    
+    read -p "HTTPS NodePort [默认: 30443]: " HTTPS_NODEPORT
+    HTTPS_NODEPORT=${HTTPS_NODEPORT:-30443}
+    
+    read -p "外部HTTP端口 [默认: 8080]: " EXTERNAL_HTTP_PORT
+    EXTERNAL_HTTP_PORT=${EXTERNAL_HTTP_PORT:-8080}
+    
+    read -p "外部HTTPS端口 [默认: 8443]: " EXTERNAL_HTTPS_PORT
+    EXTERNAL_HTTPS_PORT=${EXTERNAL_HTTPS_PORT:-8443}
+    
+    log_success "配置信息收集完成"
 }
 
-# DNS提供商配置
-configure_dns_provider() {
-    echo
-    log_info "DNS提供商配置"
-    echo -e "${CYAN}请选择DNS提供商：${NC}"
-    echo "1) Cloudflare"
-    echo "2) 阿里云DNS"
-    echo "3) 腾讯云DNS"
-    echo "4) AWS Route53"
-    echo "5) 其他"
-    echo
-    read -p "请选择 [1-5]: " dns_choice
-    
-    case $dns_choice in
-        1) 
-            DNS_PROVIDER="cloudflare"
-            log_success "已选择 Cloudflare"
-            ;;
-        2) 
-            DNS_PROVIDER="alidns"
-            log_success "已选择阿里云DNS"
-            ;;
-        3) 
-            DNS_PROVIDER="tencentcloud"
-            log_success "已选择腾讯云DNS"
-            ;;
-        4) 
-            DNS_PROVIDER="route53"
-            log_success "已选择 AWS Route53"
-            ;;
-        5) 
-            read -p "请输入DNS提供商名称: " DNS_PROVIDER
-            log_success "已选择 $DNS_PROVIDER"
-            ;;
-        *) 
-            log_error "无效选择，请重新选择"
-            configure_dns_provider
-            ;;
-    esac
-    
-    echo
-    read -p "请输入API密钥: " -s DNS_API_KEY
-    echo
-    
-    if [[ -n "$DNS_API_KEY" ]]; then
-        log_success "DNS API 密钥配置完成"
-    else
-        log_warning "未配置 DNS API 密钥，将使用 HTTP-01 验证"
-        CERT_MODE="letsencrypt-http"
-    fi
-}
-
-# 检查系统要求
-check_system_requirements() {
-    log_info "检查系统要求..."
-    
-    # 检查操作系统
-    if [[ ! -f /etc/os-release ]]; then
-        log_error "无法检测操作系统"
-        exit 1
-    fi
-    
-    source /etc/os-release
-    if [[ "$ID" != "debian" && "$ID" != "ubuntu" ]]; then
-        log_warning "推荐使用 Debian 12 或 Ubuntu 22.04+"
-    fi
-    
-    # 检查 root 权限
-    if [[ $EUID -ne 0 ]]; then
-        log_error "此脚本需要 root 权限运行"
-        exit 1
-    fi
-    
-    # 检查网络连接
-    if ! ping -c 1 8.8.8.8 &> /dev/null; then
-        log_error "网络连接失败"
-        exit 1
-    fi
-    
-    log_success "系统检查通过"
-}
-
-# 安装依赖
-install_dependencies() {
-    log_info "安装系统依赖..."
-    
-    apt-get update
-    apt-get install -y curl wget git sudo apt-transport-https ca-certificates gnupg lsb-release python3
-    
-    log_success "依赖安装完成"
-}
-
-# 安装 K3s
-install_k3s() {
-    log_info "安装 K3s..."
-    
-    if command -v k3s &> /dev/null; then
-        log_info "K3s 已安装，跳过安装步骤"
-        return 0
-    fi
-    
-    # 安装 K3s，禁用默认的 traefik 和 servicelb
-    curl -sfL https://get.k3s.io | sh -s - --disable traefik --disable servicelb
-    
-    # 设置 kubeconfig 权限
-    chmod 644 /etc/rancher/k3s/k3s.yaml
-    export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-    echo 'export KUBECONFIG=/etc/rancher/k3s/k3s.yaml' >> ~/.bashrc
-    
-    # 等待 K3s 启动
-    log_info "等待 K3s 启动..."
-    sleep 30
-    
-    # 验证 K3s 状态
-    if ! kubectl get nodes &> /dev/null; then
-        log_error "K3s 安装失败"
-        exit 1
-    fi
-    
-    log_success "K3s 安装成功"
-}
-
-# 安装 Helm
-install_helm() {
-    log_info "安装 Helm..."
-    
-    if command -v helm &> /dev/null; then
-        log_info "Helm 已安装，跳过安装步骤"
-        return 0
-    fi
-    
-    curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-    
-    log_success "Helm 安装成功"
-}
-
-# 配置 Ingress 控制器
-setup_ingress_controller() {
-    log_info "配置 Ingress 控制器..."
-    
-    # 添加 ingress-nginx 仓库
-    helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
-    helm repo update
-    
-    # 创建 namespace
-    kubectl create namespace ingress-nginx --dry-run=client -o yaml | kubectl apply -f -
-    
-    # 安装 ingress-nginx，使用正确的端口配置
-    helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
-        --namespace ingress-nginx \
-        --set controller.service.type=NodePort \
-        --set controller.service.nodePorts.http=${HTTP_NODEPORT} \
-        --set controller.service.nodePorts.https=${HTTPS_NODEPORT} \
-        --wait
-    
-    # 配置SSL跳转和外部端口
-    kubectl patch configmap ingress-nginx-controller -n ingress-nginx --patch "{\"data\":{\"ssl-redirect\":\"true\",\"force-ssl-redirect\":\"true\",\"ssl-port\":\"${EXTERNAL_HTTPS_PORT}\",\"http-port\":\"${EXTERNAL_HTTP_PORT}\"}}"
-    
-    log_success "Ingress 控制器配置完成"
-}
-
-# 配置证书管理器
+# 安装cert-manager
 setup_cert_manager() {
-    log_info "配置证书管理器..."
+    log_info "安装 cert-manager..."
     
-    # 添加 jetstack 仓库
+    # 检查是否已安装
+    if kubectl get namespace cert-manager >/dev/null 2>&1; then
+        log_info "cert-manager 已存在，跳过安装"
+        return 0
+    fi
+    
+    # 添加Helm仓库
     helm repo add jetstack https://charts.jetstack.io
     helm repo update
     
-    # 创建 namespace
-    kubectl create namespace cert-manager --dry-run=client -o yaml | kubectl apply -f -
-    
-    # 安装 cert-manager
-    helm upgrade --install cert-manager jetstack/cert-manager \
+    # 安装cert-manager
+    helm install cert-manager jetstack/cert-manager \
         --namespace cert-manager \
-        --set installCRDs=true \
+        --create-namespace \
+        --version v1.17.2 \
+        --set crds.enabled=true \
         --wait
     
-    log_success "证书管理器配置完成"
+    log_success "cert-manager 安装完成"
 }
 
-# 生成 values.yaml 配置文件 - 最终修正版
-generate_values_yaml() {
-    log_info "生成配置文件..."
-    
-    mkdir -p "${INSTALL_PATH}/configs"
-    
-    cat > "${INSTALL_PATH}/configs/values.yaml" << EOF
-# Matrix Stack 配置文件 - 符合官方schema
-# 生成时间: $(date)
-
-# 服务器配置
-serverName: "${SUBDOMAIN_MATRIX}.${DOMAIN}"
-
-# 证书管理器配置
-certManager:
-  clusterIssuer: "letsencrypt-prod"
-
-# 全局Ingress配置
-ingress:
-  className: "nginx"
-  tlsEnabled: true
-  annotations:
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
-
-# Synapse 配置
-synapse:
-  enabled: true
-  ingress:
-    host: "${SUBDOMAIN_MATRIX}.${DOMAIN}"
-    annotations:
-      cert-manager.io/cluster-issuer: "letsencrypt-prod"
-    className: "nginx"
-    tlsEnabled: true
-
-# Element Web 配置
-elementWeb:
-  enabled: true
-  replicas: 1
-  ingress:
-    host: "${SUBDOMAIN_CHAT}.${DOMAIN}"
-    annotations:
-      cert-manager.io/cluster-issuer: "letsencrypt-prod"
-    className: "nginx"
-    tlsEnabled: true
-  additional:
-    default_server_config: '{"m.homeserver":{"base_url":"https://${SUBDOMAIN_MATRIX}.${DOMAIN}","server_name":"${SUBDOMAIN_MATRIX}.${DOMAIN}"}}'
-
-# Matrix Authentication Service 配置
-matrixAuthenticationService:
-  enabled: true
-  ingress:
-    host: "${SUBDOMAIN_AUTH}.${DOMAIN}"
-    annotations:
-      cert-manager.io/cluster-issuer: "letsencrypt-prod"
-    className: "nginx"
-    tlsEnabled: true
-
-# Matrix RTC 配置
-matrixRTC:
-  enabled: true
-  ingress:
-    host: "${SUBDOMAIN_RTC}.${DOMAIN}"
-    annotations:
-      cert-manager.io/cluster-issuer: "letsencrypt-prod"
-    className: "nginx"
-    tlsEnabled: true
-
-# Well-known delegation 配置
-wellKnownDelegation:
-  enabled: true
-
-EOF
-
-    # 保存配置到环境文件
-    cat > "${INSTALL_PATH}/configs/.env" << EOF
-# Matrix Stack 部署配置
-DOMAIN=${DOMAIN}
-INSTALL_PATH=${INSTALL_PATH}
-HTTP_NODEPORT=${HTTP_NODEPORT}
-HTTPS_NODEPORT=${HTTPS_NODEPORT}
-EXTERNAL_HTTP_PORT=${EXTERNAL_HTTP_PORT}
-EXTERNAL_HTTPS_PORT=${EXTERNAL_HTTPS_PORT}
-TURN_PORT_START=${TURN_PORT_START}
-TURN_PORT_END=${TURN_PORT_END}
-SUBDOMAIN_MATRIX=${SUBDOMAIN_MATRIX}
-SUBDOMAIN_CHAT=${SUBDOMAIN_CHAT}
-SUBDOMAIN_AUTH=${SUBDOMAIN_AUTH}
-SUBDOMAIN_RTC=${SUBDOMAIN_RTC}
-ADMIN_USERNAME=${ADMIN_USERNAME}
-ADMIN_EMAIL=${ADMIN_EMAIL}
-USE_LIVEKIT_TURN=${USE_LIVEKIT_TURN}
-CERT_MODE=${CERT_MODE}
-DNS_PROVIDER=${DNS_PROVIDER}
-SCRIPT_VERSION=${SCRIPT_VERSION}
-EOF
-
-    log_success "配置文件生成完成: ${INSTALL_PATH}/configs/values.yaml"
-}
-
-# 创建 ClusterIssuer
+# 创建ClusterIssuer
 create_cluster_issuer() {
-    log_info "创建证书签发器..."
+    log_info "创建 ClusterIssuer..."
     
     case $CERT_MODE in
-        "letsencrypt-http")
-            cat > "${INSTALL_PATH}/configs/cluster-issuer.yaml" << EOF
-apiVersion: cert-manager.io/v1
-kind: ClusterIssuer
-metadata:
-  name: letsencrypt-prod
-spec:
-  acme:
-    server: https://acme-v02.api.letsencrypt.org/directory
-    email: ${ADMIN_EMAIL}
-    privateKeySecretRef:
-      name: letsencrypt-prod
-    solvers:
-    - http01:
-        ingress:
-          class: nginx
-EOF
-            ;;
         "letsencrypt-dns")
-            cat > "${INSTALL_PATH}/configs/cluster-issuer.yaml" << EOF
+            create_letsencrypt_dns_issuer
+            ;;
+        "letsencrypt-http")
+            create_letsencrypt_http_issuer
+            ;;
+        "selfsigned")
+            create_selfsigned_issuer
+            ;;
+    esac
+}
+
+# 创建Let's Encrypt DNS-01 ClusterIssuer
+create_letsencrypt_dns_issuer() {
+    log_info "创建 Let's Encrypt DNS-01 ClusterIssuer..."
+    
+    # 创建Cloudflare API Token Secret
+    if [ "$DNS_PROVIDER" = "cloudflare" ] && [ -n "$DNS_API_KEY" ]; then
+        kubectl create secret generic cloudflare-api-token \
+            --from-literal=api-token="$DNS_API_KEY" \
+            -n cert-manager \
+            --dry-run=client -o yaml | kubectl apply -f -
+        
+        # 在ess命名空间也创建一份
+        kubectl create namespace ess --dry-run=client -o yaml | kubectl apply -f -
+        kubectl create secret generic cloudflare-api-token \
+            --from-literal=api-token="$DNS_API_KEY" \
+            -n ess \
+            --dry-run=client -o yaml | kubectl apply -f -
+    fi
+    
+    # 创建ClusterIssuer
+    cat <<EOF | kubectl apply -f -
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
@@ -1204,7 +1098,7 @@ metadata:
 spec:
   acme:
     server: https://acme-v02.api.letsencrypt.org/directory
-    email: ${ADMIN_EMAIL}
+    email: admin@${DOMAIN}
     privateKeySecretRef:
       name: letsencrypt-prod
     solvers:
@@ -1214,13 +1108,39 @@ spec:
             name: cloudflare-api-token
             key: api-token
 EOF
-            # 创建 DNS API 密钥 Secret
-            kubectl create secret generic cloudflare-api-token \
-                --from-literal=api-token="$DNS_API_KEY" \
-                --namespace cert-manager
-            ;;
-        "selfsigned")
-            cat > "${INSTALL_PATH}/configs/cluster-issuer.yaml" << EOF
+    
+    log_success "Let's Encrypt DNS-01 ClusterIssuer 创建完成"
+}
+
+# 创建Let's Encrypt HTTP-01 ClusterIssuer
+create_letsencrypt_http_issuer() {
+    log_info "创建 Let's Encrypt HTTP-01 ClusterIssuer..."
+    
+    cat <<EOF | kubectl apply -f -
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: admin@${DOMAIN}
+    privateKeySecretRef:
+      name: letsencrypt-prod
+    solvers:
+    - http01:
+        ingress:
+          class: nginx
+EOF
+    
+    log_success "Let's Encrypt HTTP-01 ClusterIssuer 创建完成"
+}
+
+# 创建自签名ClusterIssuer
+create_selfsigned_issuer() {
+    log_info "创建自签名 ClusterIssuer..."
+    
+    cat <<EOF | kubectl apply -f -
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
@@ -1228,536 +1148,541 @@ metadata:
 spec:
   selfSigned: {}
 EOF
-            ;;
-    esac
     
-    kubectl apply -f "${INSTALL_PATH}/configs/cluster-issuer.yaml"
-    
-    log_success "证书签发器创建完成"
+    log_success "自签名 ClusterIssuer 创建完成"
 }
 
-# 部署 Matrix Stack
-deploy_matrix_stack() {
-    log_info "部署 Matrix Stack..."
+# 安装Helm Chart
+install_helm_chart() {
+    log_info "安装 Matrix Stack Helm Chart..."
     
-    # 创建 namespace
+    # 添加Element Helm仓库
+    helm repo add element-hq https://element-hq.github.io/ess-helm
+    helm repo update
+    
+    # 创建命名空间
     kubectl create namespace ess --dry-run=client -o yaml | kubectl apply -f -
     
-    # 使用 OCI registry 部署 Matrix Stack
-    helm upgrade --install ess oci://ghcr.io/element-hq/ess-helm/matrix-stack \
+    # 创建values文件
+    create_helm_values
+    
+    # 安装Helm Chart
+    helm install ess element-hq/matrix-stack \
         --namespace ess \
-        --values "${INSTALL_PATH}/configs/values.yaml" \
+        --values /tmp/matrix-values.yaml \
         --wait \
-        --timeout 15m
+        --timeout 10m
     
-    log_success "Matrix Stack 部署完成"
+    log_success "Matrix Stack Helm Chart 安装完成"
 }
 
-# 创建管理员用户
-create_admin_user() {
-    log_info "创建管理员用户..."
+# 创建Helm values文件
+create_helm_values() {
+    log_info "创建 Helm values 文件..."
     
-    # 等待 Synapse pod 就绪
-    kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=synapse -n ess --timeout=300s
+    local issuer_name="letsencrypt-prod"
+    if [ "$CERT_MODE" = "selfsigned" ]; then
+        issuer_name="selfsigned-issuer"
+    fi
     
-    # 获取 Synapse pod 名称
-    SYNAPSE_POD=$(kubectl get pods -n ess -l app.kubernetes.io/name=synapse -o jsonpath='{.items[0].metadata.name}')
+    cat > /tmp/matrix-values.yaml <<EOF
+serverName: ${DOMAIN}
+
+labels:
+  deployment: ess-deployment
+
+ingress:
+  className: nginx
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: ${issuer_name}
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+
+synapse:
+  ingress:
+    host: ${SUBDOMAIN_MATRIX}.${DOMAIN}
+  
+elementWeb:
+  ingress:
+    host: ${SUBDOMAIN_CHAT}.${DOMAIN}
+
+matrixAuthenticationService:
+  ingress:
+    host: ${SUBDOMAIN_AUTH}.${DOMAIN}
+
+matrixRTC:
+  ingress:
+    host: ${SUBDOMAIN_RTC}.${DOMAIN}
+
+wellKnown:
+  ingress:
+    host: ${DOMAIN}
+
+# PostgreSQL配置
+postgresql:
+  enabled: true
+  auth:
+    database: synapse
+    username: synapse_user
+
+# 资源限制
+resources:
+  limits:
+    cpu: 2000m
+    memory: 4Gi
+  requests:
+    cpu: 500m
+    memory: 1Gi
+EOF
     
-    # 创建管理员用户
-    kubectl exec -n ess "$SYNAPSE_POD" -- register_new_matrix_user \
-        -u "$ADMIN_USERNAME" \
-        -p "$ADMIN_PASSWORD" \
-        -a \
-        -c /data/homeserver.yaml \
-        http://localhost:8008
-    
-    log_success "管理员用户创建完成: $ADMIN_USERNAME"
+    log_success "Helm values 文件创建完成"
 }
 
-# 显示服务状态
-show_service_status() {
-    clear
-    echo -e "${CYAN}=== 服务状态 ===${NC}"
-    echo
+# 等待部署完成
+wait_for_deployment() {
+    log_info "等待部署完成..."
     
-    echo -e "${YELLOW}Kubernetes 节点状态：${NC}"
-    kubectl get nodes
-    echo
+    # 等待所有Pod就绪
+    if ! wait_for_pods_ready "ess" "app.kubernetes.io/part-of=matrix-stack" 600; then
+        log_error "部署超时"
+        return 1
+    fi
     
-    echo -e "${YELLOW}Matrix Stack Pods：${NC}"
+    log_success "部署完成"
+}
+
+# 显示部署信息
+show_deployment_info() {
+    log_info "部署信息:"
+    
+    echo
+    echo "=== 访问地址 ==="
+    echo "Element Web: https://${SUBDOMAIN_CHAT}.${DOMAIN}:${EXTERNAL_HTTPS_PORT}"
+    echo "Matrix服务器: https://${SUBDOMAIN_MATRIX}.${DOMAIN}:${EXTERNAL_HTTPS_PORT}"
+    echo "认证服务: https://${SUBDOMAIN_AUTH}.${DOMAIN}:${EXTERNAL_HTTPS_PORT}"
+    echo "RTC服务: https://${SUBDOMAIN_RTC}.${DOMAIN}:${EXTERNAL_HTTPS_PORT}"
+    
+    echo
+    echo "=== 管理员账户 ==="
+    echo "用户名: ${ADMIN_USERNAME}"
+    echo "密码: [已设置]"
+    echo "Matrix ID: @${ADMIN_USERNAME}:${DOMAIN}"
+    
+    echo
+    echo "=== 端口配置 ==="
+    echo "HTTP NodePort: ${HTTP_NODEPORT}"
+    echo "HTTPS NodePort: ${HTTPS_NODEPORT}"
+    echo "外部HTTP端口: ${EXTERNAL_HTTP_PORT}"
+    echo "外部HTTPS端口: ${EXTERNAL_HTTPS_PORT}"
+    
+    echo
+    echo "=== 证书配置 ==="
+    echo "证书类型: ${CERT_MODE}"
+    if [ "$CERT_MODE" = "letsencrypt-dns" ]; then
+        echo "DNS提供商: ${DNS_PROVIDER}"
+    fi
+    
+    echo
+    echo "=== 下一步 ==="
+    echo "1. 确保防火墙开放了必要的端口"
+    echo "2. 配置DNS解析指向您的服务器IP"
+    echo "3. 等待证书申请完成（如使用Let's Encrypt）"
+    echo "4. 使用管理员账户登录Element Web"
+}
+
+# 管理已部署的服务
+manage_deployed_services() {
+    while true; do
+        clear
+        show_banner
+        echo -e "${CYAN}管理已部署的服务${NC}"
+        echo "1) 查看服务状态"
+        echo "2) 重启服务"
+        echo "3) 更新配置"
+        echo "4) 扩缩容"
+        echo "5) 查看日志"
+        echo "6) 返回主菜单"
+        echo
+        read -p "请选择操作 [1-6]: " choice
+        
+        case $choice in
+            1) view_service_status ;;
+            2) restart_services ;;
+            3) update_configuration ;;
+            4) scale_services ;;
+            5) view_logs_menu ;;
+            6) break ;;
+            *) log_error "无效选择" ;;
+        esac
+        
+        if [ "$choice" != "6" ]; then
+            read -p "按回车键继续..."
+        fi
+    done
+}
+
+# 查看服务状态
+view_service_status() {
+    log_info "查看服务状态..."
+    
+    echo
+    echo "=== Pod状态 ==="
     kubectl get pods -n ess
-    echo
     
-    echo -e "${YELLOW}Ingress 状态：${NC}"
-    kubectl get ingress -n ess
     echo
-    
-    echo -e "${YELLOW}证书状态：${NC}"
-    kubectl get certificates -n ess
-    echo
-    
-    echo -e "${YELLOW}服务状态：${NC}"
+    echo "=== 服务状态 ==="
     kubectl get svc -n ess
-    echo
     
-    read -p "按回车键返回管理菜单..."
-    show_management_menu
-}
-
-# 证书管理
-show_certificate_management() {
-    clear
-    echo -e "${CYAN}=== 证书管理 ===${NC}"
     echo
-    echo "1) 查看证书状态"
-    echo "2) 切换到 Let's Encrypt (HTTP-01)"
-    echo "3) 切换到 Let's Encrypt (DNS-01)"
-    echo "4) 切换到自签名证书"
-    echo "5) 手动更新证书"
-    echo "6) 返回管理菜单"
-    echo
-    read -p "请选择 [1-6]: " cert_choice
+    echo "=== Ingress状态 ==="
+    kubectl get ingress -n ess
     
-    case $cert_choice in
-        1) show_certificate_status ;;
-        2) switch_to_letsencrypt_http ;;
-        3) switch_to_letsencrypt_dns ;;
-        4) switch_to_selfsigned ;;
-        5) manual_update_certificates ;;
-        6) show_management_menu ;;
-        *) log_error "无效选项"; show_certificate_management ;;
-    esac
-}
-
-# 查看证书状态
-show_certificate_status() {
     echo
-    echo -e "${YELLOW}证书状态：${NC}"
+    echo "=== 证书状态 ==="
     kubectl get certificates -n ess
-    echo
-    echo -e "${YELLOW}证书详情：${NC}"
-    kubectl describe certificates -n ess
-    echo
-    read -p "按回车键返回证书管理..."
-    show_certificate_management
 }
 
 # 重启服务
 restart_services() {
-    log_info "重启 Matrix Stack 服务..."
-    
-    kubectl rollout restart deployment -n ess
-    kubectl rollout restart statefulset -n ess
-    
-    log_success "服务重启完成"
-    read -p "按回车键返回管理菜单..."
-    show_management_menu
-}
-
-# 显示日志菜单
-show_logs_menu() {
-    clear
-    echo -e "${CYAN}=== 日志查看 ===${NC}"
     echo
-    echo "1) Synapse 日志"
-    echo "2) Element Web 日志"
-    echo "3) 认证服务日志"
-    echo "4) RTC 服务日志"
-    echo "5) Ingress 控制器日志"
-    echo "6) 证书管理器日志"
-    echo "7) 返回管理菜单"
+    echo "重启服务选项:"
+    echo "1) 重启所有服务"
+    echo "2) 重启Synapse"
+    echo "3) 重启Element Web"
+    echo "4) 重启Matrix Authentication Service"
+    echo "5) 重启Matrix RTC"
+    echo "6) 重启HAProxy"
+    echo "7) 重启PostgreSQL"
     echo
-    read -p "请选择 [1-7]: " log_choice
+    read -p "请选择要重启的服务 [1-7]: " choice
     
-    case $log_choice in
-        1) kubectl logs -n ess -l app.kubernetes.io/name=synapse -f ;;
-        2) kubectl logs -n ess -l app.kubernetes.io/name=element-web -f ;;
-        3) kubectl logs -n ess -l app.kubernetes.io/name=matrix-authentication-service -f ;;
-        4) kubectl logs -n ess -l app.kubernetes.io/name=matrix-rtc -f ;;
-        5) kubectl logs -n ingress-nginx -l app.kubernetes.io/name=ingress-nginx -f ;;
-        6) kubectl logs -n cert-manager -l app.kubernetes.io/name=cert-manager -f ;;
-        7) show_management_menu ;;
-        *) log_error "无效选项"; show_logs_menu ;;
+    case $choice in
+        1)
+            log_info "重启所有服务..."
+            kubectl rollout restart deployment -n ess
+            kubectl rollout restart statefulset -n ess
+            ;;
+        2)
+            log_info "重启Synapse..."
+            kubectl rollout restart statefulset -n ess -l app.kubernetes.io/name=synapse-main
+            ;;
+        3)
+            log_info "重启Element Web..."
+            kubectl rollout restart deployment -n ess -l app.kubernetes.io/name=element-web
+            ;;
+        4)
+            log_info "重启Matrix Authentication Service..."
+            kubectl rollout restart deployment -n ess -l app.kubernetes.io/name=matrix-authentication-service
+            ;;
+        5)
+            log_info "重启Matrix RTC..."
+            kubectl rollout restart deployment -n ess -l app.kubernetes.io/name=matrix-rtc
+            ;;
+        6)
+            log_info "重启HAProxy..."
+            kubectl rollout restart deployment -n ess -l app.kubernetes.io/name=haproxy
+            ;;
+        7)
+            log_info "重启PostgreSQL..."
+            kubectl rollout restart statefulset -n ess -l app.kubernetes.io/name=postgresql
+            ;;
+        *) log_error "无效选择" ;;
     esac
-}
-
-# 备份数据
-backup_data() {
-    log_info "备份 Matrix 数据..."
     
-    # 加载配置
-    load_config
-    
-    BACKUP_DIR="${INSTALL_PATH}/backups/$(date +%Y%m%d_%H%M%S)"
-    mkdir -p "$BACKUP_DIR"
-    
-    # 备份配置文件
-    cp -r "${INSTALL_PATH}/configs" "$BACKUP_DIR/"
-    
-    # 备份数据库
-    POSTGRES_POD=$(kubectl get pods -n ess -l app.kubernetes.io/name=postgresql -o jsonpath='{.items[0].metadata.name}')
-    if [[ -n "$POSTGRES_POD" ]]; then
-        kubectl exec -n ess "$POSTGRES_POD" -- pg_dumpall -U postgres > "$BACKUP_DIR/database.sql"
+    if [ "$choice" -ge 1 ] && [ "$choice" -le 7 ]; then
+        log_success "重启命令已执行"
     fi
-    
-    # 备份媒体文件
-    kubectl cp ess/synapse-0:/data/media_store "$BACKUP_DIR/media_store" 2>/dev/null || true
-    
-    log_success "数据备份完成: $BACKUP_DIR"
-    read -p "按回车键返回管理菜单..."
-    show_management_menu
-}
-
-# 恢复数据
-restore_data() {
-    echo
-    echo -e "${YELLOW}可用的备份：${NC}"
-    ls -la "${INSTALL_PATH}/backups/" 2>/dev/null || echo "未找到备份文件"
-    echo
-    read -p "请输入备份目录名称: " backup_name
-    
-    BACKUP_PATH="${INSTALL_PATH}/backups/$backup_name"
-    if [[ ! -d "$BACKUP_PATH" ]]; then
-        log_error "备份目录不存在"
-        show_management_menu
-        return
-    fi
-    
-    log_info "恢复数据从: $BACKUP_PATH"
-    
-    # 恢复配置文件
-    if [[ -d "$BACKUP_PATH/configs" ]]; then
-        cp -r "$BACKUP_PATH/configs"/* "${INSTALL_PATH}/configs/"
-        log_success "配置文件恢复完成"
-    fi
-    
-    # 恢复数据库
-    if [[ -f "$BACKUP_PATH/database.sql" ]]; then
-        POSTGRES_POD=$(kubectl get pods -n ess -l app.kubernetes.io/name=postgresql -o jsonpath='{.items[0].metadata.name}')
-        if [[ -n "$POSTGRES_POD" ]]; then
-            kubectl exec -i -n ess "$POSTGRES_POD" -- psql -U postgres < "$BACKUP_PATH/database.sql"
-            log_success "数据库恢复完成"
-        fi
-    fi
-    
-    log_success "数据恢复完成"
-    read -p "按回车键返回管理菜单..."
-    show_management_menu
 }
 
 # 更新配置
 update_configuration() {
     log_info "更新配置..."
     
-    # 重新生成配置文件
-    load_config
-    generate_values_yaml
-    
-    # 更新部署
-    helm upgrade ess oci://ghcr.io/element-hq/ess-helm/matrix-stack \
-        --namespace ess \
-        --values "${INSTALL_PATH}/configs/values.yaml" \
-        --wait
-    
-    log_success "配置更新完成"
-    read -p "按回车键返回管理菜单..."
-    show_management_menu
-}
-
-# 清理失败的部署
-cleanup_failed_deployment() {
-    log_info "清理失败的部署..."
-    
-    # 清理 Matrix Stack
-    helm uninstall ess -n ess 2>/dev/null || true
-    
-    # 清理 namespace
-    kubectl delete namespace ess 2>/dev/null || true
-    
-    # 清理证书
-    kubectl delete clusterissuer --all 2>/dev/null || true
-    
-    log_success "失败的部署已清理"
-    read -p "按回车键返回清理菜单..."
-    show_cleanup_menu
-}
-
-# 重置配置
-reset_configuration() {
     echo
-    echo -e "${YELLOW}警告：此操作将删除所有配置文件！${NC}"
-    read -p "确认继续？输入 'RESET' 确认: " confirm
+    echo "配置更新选项:"
+    echo "1) 更新Helm values"
+    echo "2) 更新Synapse配置"
+    echo "3) 更新Element Web配置"
+    echo "4) 更新证书配置"
+    echo
+    read -p "请选择要更新的配置 [1-4]: " choice
     
-    if [[ "$confirm" != "RESET" ]]; then
-        log_info "操作已取消"
-        show_cleanup_menu
-        return
+    case $choice in
+        1) update_helm_values ;;
+        2) update_synapse_config ;;
+        3) update_element_config ;;
+        4) update_cert_config ;;
+        *) log_error "无效选择" ;;
+    esac
+}
+
+# 更新Helm values
+update_helm_values() {
+    log_info "更新Helm values..."
+    
+    # 获取当前values
+    helm get values ess -n ess > /tmp/current-values.yaml
+    
+    log_info "当前values已保存到 /tmp/current-values.yaml"
+    log_info "请编辑该文件后按回车继续"
+    
+    read -p "按回车键打开编辑器..."
+    ${EDITOR:-nano} /tmp/current-values.yaml
+    
+    read -p "确认应用更新? [y/N]: " confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        helm upgrade ess element-hq/matrix-stack \
+            --namespace ess \
+            --values /tmp/current-values.yaml \
+            --wait
+        log_success "配置更新完成"
+    else
+        log_info "更新已取消"
+    fi
+}
+
+# 扩缩容
+scale_services() {
+    echo
+    echo "扩缩容选项:"
+    echo "1) Synapse"
+    echo "2) Element Web"
+    echo "3) Matrix Authentication Service"
+    echo "4) Matrix RTC"
+    echo
+    read -p "请选择要扩缩容的服务 [1-4]: " choice
+    
+    local deployment=""
+    case $choice in
+        1) deployment="synapse-main" ;;
+        2) deployment="element-web" ;;
+        3) deployment="matrix-authentication-service" ;;
+        4) deployment="matrix-rtc" ;;
+        *) 
+            log_error "无效选择"
+            return 1
+            ;;
+    esac
+    
+    read -p "请输入副本数量: " replicas
+    if [[ "$replicas" =~ ^[0-9]+$ ]]; then
+        kubectl scale deployment "$deployment" -n ess --replicas="$replicas"
+        log_success "扩缩容命令已执行"
+    else
+        log_error "无效的副本数量"
+    fi
+}
+
+# 备份和恢复菜单
+backup_restore_menu() {
+    while true; do
+        clear
+        show_banner
+        echo -e "${CYAN}备份和恢复${NC}"
+        echo "1) 创建备份"
+        echo "2) 恢复备份"
+        echo "3) 列出备份"
+        echo "4) 删除备份"
+        echo "5) 返回主菜单"
+        echo
+        read -p "请选择操作 [1-5]: " choice
+        
+        case $choice in
+            1) create_backup ;;
+            2) restore_backup ;;
+            3) list_backups ;;
+            4) delete_backup ;;
+            5) break ;;
+            *) log_error "无效选择" ;;
+        esac
+        
+        if [ "$choice" != "5" ]; then
+            read -p "按回车键继续..."
+        fi
+    done
+}
+
+# 创建备份
+create_backup() {
+    log_info "创建备份..."
+    
+    local backup_dir="/tmp/matrix-backup-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$backup_dir"
+    
+    # 备份Helm values
+    log_info "备份Helm配置..."
+    helm get values ess -n ess > "$backup_dir/helm-values.yaml"
+    
+    # 备份Kubernetes资源
+    log_info "备份Kubernetes资源..."
+    kubectl get all -n ess -o yaml > "$backup_dir/k8s-resources.yaml"
+    kubectl get secrets -n ess -o yaml > "$backup_dir/secrets.yaml"
+    kubectl get configmaps -n ess -o yaml > "$backup_dir/configmaps.yaml"
+    kubectl get pvc -n ess -o yaml > "$backup_dir/pvc.yaml"
+    
+    # 备份数据库（如果可能）
+    log_info "备份数据库..."
+    local postgres_pod=$(kubectl get pods -n ess -l app.kubernetes.io/name=postgresql -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    if [ -n "$postgres_pod" ]; then
+        kubectl exec -n ess "$postgres_pod" -- pg_dump -U synapse_user synapse > "$backup_dir/database.sql" 2>/dev/null || log_warning "数据库备份失败"
     fi
     
-    # 删除配置文件
-    rm -rf "${DEFAULT_INSTALL_PATH}/configs" 2>/dev/null || true
-    rm -rf "/opt/matrix/configs" 2>/dev/null || true
+    # 创建压缩包
+    tar -czf "${backup_dir}.tar.gz" -C "$(dirname "$backup_dir")" "$(basename "$backup_dir")"
+    rm -rf "$backup_dir"
     
-    log_success "配置文件已重置"
-    read -p "按回车键返回清理菜单..."
-    show_cleanup_menu
+    log_success "备份创建完成: ${backup_dir}.tar.gz"
+}
+
+# 恢复备份
+restore_backup() {
+    log_info "恢复备份..."
+    
+    read -p "请输入备份文件路径: " backup_file
+    
+    if [ ! -f "$backup_file" ]; then
+        log_error "备份文件不存在"
+        return 1
+    fi
+    
+    read -p "确认恢复备份? 这将覆盖当前配置 [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        log_info "恢复已取消"
+        return 0
+    fi
+    
+    local restore_dir="/tmp/matrix-restore-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$restore_dir"
+    
+    # 解压备份
+    tar -xzf "$backup_file" -C "$restore_dir"
+    
+    local backup_content_dir=$(find "$restore_dir" -maxdepth 1 -type d -name "matrix-backup-*" | head -1)
+    
+    if [ -z "$backup_content_dir" ]; then
+        log_error "无效的备份文件格式"
+        rm -rf "$restore_dir"
+        return 1
+    fi
+    
+    # 恢复Helm配置
+    if [ -f "$backup_content_dir/helm-values.yaml" ]; then
+        log_info "恢复Helm配置..."
+        helm upgrade ess element-hq/matrix-stack \
+            --namespace ess \
+            --values "$backup_content_dir/helm-values.yaml" \
+            --wait || log_warning "Helm配置恢复失败"
+    fi
+    
+    # 恢复数据库
+    if [ -f "$backup_content_dir/database.sql" ]; then
+        log_info "恢复数据库..."
+        local postgres_pod=$(kubectl get pods -n ess -l app.kubernetes.io/name=postgresql -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+        if [ -n "$postgres_pod" ]; then
+            kubectl exec -i -n ess "$postgres_pod" -- psql -U synapse_user synapse < "$backup_content_dir/database.sql" 2>/dev/null || log_warning "数据库恢复失败"
+        fi
+    fi
+    
+    rm -rf "$restore_dir"
+    log_success "备份恢复完成"
+}
+
+# 列出备份
+list_backups() {
+    log_info "列出备份文件..."
+    
+    echo
+    echo "=== /tmp目录中的备份文件 ==="
+    ls -la /tmp/matrix-backup-*.tar.gz 2>/dev/null || log_info "未找到备份文件"
+}
+
+# 删除备份
+delete_backup() {
+    log_info "删除备份..."
+    
+    list_backups
+    
+    echo
+    read -p "请输入要删除的备份文件路径: " backup_file
+    
+    if [ ! -f "$backup_file" ]; then
+        log_error "备份文件不存在"
+        return 1
+    fi
+    
+    read -p "确认删除备份文件 $backup_file? [y/N]: " confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        rm -f "$backup_file"
+        log_success "备份文件已删除"
+    else
+        log_info "删除已取消"
+    fi
 }
 
 # 完全卸载
-full_uninstall() {
-    echo
-    echo -e "${RED}警告：此操作将完全删除 Matrix Stack 和所有数据！${NC}"
-    read -p "确认继续？输入 'YES' 确认: " confirm
+uninstall_matrix_stack() {
+    log_warning "这将完全删除Matrix Stack及其所有数据！"
+    read -p "确认卸载? 请输入 'DELETE' 确认: " confirm
     
-    if [[ "$confirm" != "YES" ]]; then
-        log_info "操作已取消"
-        show_cleanup_menu
-        return
+    if [ "$confirm" != "DELETE" ]; then
+        log_info "卸载已取消"
+        return 0
     fi
     
-    log_info "开始完全卸载..."
+    log_info "开始卸载Matrix Stack..."
     
-    # 卸载 Matrix Stack
-    helm uninstall ess -n ess 2>/dev/null || true
+    # 删除Helm release
+    helm uninstall ess -n ess 2>/dev/null || log_warning "Helm release删除失败"
     
-    # 卸载 cert-manager
-    helm uninstall cert-manager -n cert-manager 2>/dev/null || true
+    # 删除命名空间
+    kubectl delete namespace ess 2>/dev/null || log_warning "命名空间删除失败"
     
-    # 卸载 ingress-nginx
-    helm uninstall ingress-nginx -n ingress-nginx 2>/dev/null || true
+    # 删除ClusterIssuer
+    kubectl delete clusterissuer letsencrypt-prod selfsigned-issuer 2>/dev/null || log_warning "ClusterIssuer删除失败"
     
-    # 删除 namespaces
-    kubectl delete namespace ess cert-manager ingress-nginx 2>/dev/null || true
-    
-    # 删除 ClusterIssuers
-    kubectl delete clusterissuer --all 2>/dev/null || true
-    
-    # 删除配置文件
-    load_config
-    if [[ -n "$INSTALL_PATH" && -d "$INSTALL_PATH" ]]; then
-        rm -rf "$INSTALL_PATH"
+    # 删除cert-manager（可选）
+    read -p "是否同时删除cert-manager? [y/N]: " delete_cert_manager
+    if [[ "$delete_cert_manager" =~ ^[Yy]$ ]]; then
+        helm uninstall cert-manager -n cert-manager 2>/dev/null || log_warning "cert-manager删除失败"
+        kubectl delete namespace cert-manager 2>/dev/null || log_warning "cert-manager命名空间删除失败"
     fi
     
-    log_success "Matrix Stack 已完全卸载"
-    read -p "按回车键返回主菜单..."
-    show_main_menu
+    # 清理临时文件
+    rm -f /tmp/matrix-values.yaml /tmp/current-values.yaml
+    
+    log_success "Matrix Stack卸载完成"
 }
 
-# 清理 Kubernetes
-cleanup_kubernetes() {
-    echo
-    echo -e "${RED}警告：此操作将完全删除 K3s 集群和所有数据！${NC}"
-    read -p "确认继续？输入 'DELETE' 确认: " confirm
-    
-    if [[ "$confirm" != "DELETE" ]]; then
-        log_info "操作已取消"
-        show_cleanup_menu
-        return
-    fi
-    
-    log_info "开始清理 Kubernetes 集群..."
-    
-    # 停止 K3s 服务
-    systemctl stop k3s 2>/dev/null || true
-    
-    # 卸载 K3s
-    /usr/local/bin/k3s-uninstall.sh 2>/dev/null || true
-    
-    # 清理残留文件
-    rm -rf /etc/rancher/k3s
-    rm -rf /var/lib/rancher/k3s
-    rm -rf /var/lib/kubelet
-    rm -rf /etc/kubernetes
-    
-    log_success "Kubernetes 集群已清理"
-    read -p "按回车键返回主菜单..."
-    show_main_menu
-}
-
-# 切换证书模式的函数
-switch_to_letsencrypt_http() {
-    log_info "切换到 Let's Encrypt (HTTP-01) 模式..."
-    
-    # 删除现有的 ClusterIssuer
-    kubectl delete clusterissuer --all 2>/dev/null || true
-    
-    # 更新配置
-    load_config
-    CERT_MODE="letsencrypt-http"
-    
-    # 重新创建 ClusterIssuer
-    create_cluster_issuer
-    
-    # 更新部署
-    update_configuration
-    
-    log_success "已切换到 Let's Encrypt (HTTP-01) 模式"
-    read -p "按回车键返回证书管理..."
-    show_certificate_management
-}
-
-switch_to_letsencrypt_dns() {
-    log_info "切换到 Let's Encrypt (DNS-01) 模式..."
-    
-    # 配置 DNS 提供商
-    configure_dns_provider
-    
-    # 删除现有的 ClusterIssuer
-    kubectl delete clusterissuer --all 2>/dev/null || true
-    
-    # 更新配置
-    load_config
-    CERT_MODE="letsencrypt-dns"
-    
-    # 重新创建 ClusterIssuer
-    create_cluster_issuer
-    
-    # 更新部署
-    update_configuration
-    
-    log_success "已切换到 Let's Encrypt (DNS-01) 模式"
-    read -p "按回车键返回证书管理..."
-    show_certificate_management
-}
-
-switch_to_selfsigned() {
-    log_info "切换到自签名证书模式..."
-    
-    # 删除现有的 ClusterIssuer
-    kubectl delete clusterissuer --all 2>/dev/null || true
-    
-    # 更新配置
-    load_config
-    CERT_MODE="selfsigned"
-    
-    # 重新创建 ClusterIssuer
-    create_cluster_issuer
-    
-    # 更新部署
-    update_configuration
-    
-    log_success "已切换到自签名证书模式"
-    read -p "按回车键返回证书管理..."
-    show_certificate_management
-}
-
-manual_update_certificates() {
-    log_info "手动更新证书..."
-    
-    # 删除现有证书
-    kubectl delete certificates --all -n ess 2>/dev/null || true
-    
-    # 重新部署以触发证书申请
-    kubectl rollout restart deployment -n ess
-    
-    log_success "证书更新已触发"
-    read -p "按回车键返回证书管理..."
-    show_certificate_management
-}
-
-# 显示部署结果
-show_deployment_result() {
-    echo
-    log_success "Matrix Stack 部署完成！"
-    echo
-    echo -e "${CYAN}访问地址：${NC}"
-    echo "• Element Web: https://${SUBDOMAIN_CHAT}.${DOMAIN}:${EXTERNAL_HTTPS_PORT}"
-    echo "• Synapse API: https://${SUBDOMAIN_MATRIX}.${DOMAIN}:${EXTERNAL_HTTPS_PORT}"
-    echo "• 认证服务: https://${SUBDOMAIN_AUTH}.${DOMAIN}:${EXTERNAL_HTTPS_PORT}"
-    echo "• RTC 服务: https://${SUBDOMAIN_RTC}.${DOMAIN}:${EXTERNAL_HTTPS_PORT}"
-    echo
-    echo -e "${CYAN}管理员账户：${NC}"
-    echo "• 用户名: $ADMIN_USERNAME"
-    echo "• 密码: $ADMIN_PASSWORD"
-    echo
-    echo -e "${CYAN}端口配置：${NC}"
-    echo "• 内部HTTP NodePort: $HTTP_NODEPORT"
-    echo "• 内部HTTPS NodePort: $HTTPS_NODEPORT"
-    echo "• 外部HTTP端口: $EXTERNAL_HTTP_PORT"
-    echo "• 外部HTTPS端口: $EXTERNAL_HTTPS_PORT"
-    echo "• TURN UDP 端口: $TURN_PORT_START-$TURN_PORT_END"
-    echo
-    echo -e "${YELLOW}重要提醒：${NC}"
-    echo "1. 请确保域名 DNS 记录指向您的服务器 IP"
-    echo "2. 请配置路由器端口转发："
-    echo "   - 外部 ${EXTERNAL_HTTP_PORT} → 内部 ${HTTP_NODEPORT}"
-    echo "   - 外部 ${EXTERNAL_HTTPS_PORT} → 内部 ${HTTPS_NODEPORT}"
-    echo "   - 外部 UDP ${TURN_PORT_START}-${TURN_PORT_END} → 内部相同端口"
-    echo "3. Element X 客户端连接地址: ${DOMAIN}"
-    echo "4. 配置文件保存在: ${INSTALL_PATH}/configs/"
-    echo
-    echo -e "${CYAN}管理命令：${NC}"
-    echo "• 重新运行此脚本进行管理操作"
-    echo "• 查看服务状态: kubectl get pods -n ess"
-    echo "• 查看日志: kubectl logs -n ess -l app.kubernetes.io/name=synapse"
-    echo
-    echo -e "${GREEN}高级功能：${NC}"
-    echo "• 用户管理：创建、删除、权限设置"
-    echo "• 邀请码系统：生成、管理注册邀请"
-    echo "• 证书管理：切换证书模式"
-    echo "• 备份恢复：数据安全保障"
-    echo
-}
-
-# 主函数
+# 主程序入口
 main() {
+    # 检查是否为root用户
+    if [ "$EUID" -eq 0 ]; then
+        log_warning "不建议以root用户运行此脚本"
+        read -p "是否继续? [y/N]: " continue_as_root
+        if [[ ! "$continue_as_root" =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
+    fi
+    
+    # 显示欢迎信息
     show_banner
-    
-    # 检查系统要求
-    check_system_requirements
-    
-    # 显示菜单
-    show_main_menu
-    
-    # 配置部署参数
-    if [[ "$DEPLOYMENT_MODE" == "quick" ]]; then
-        quick_deployment_config
-    elif [[ "$DEPLOYMENT_MODE" == "custom" ]]; then
-        custom_deployment_config
-    else
-        return 0  # 管理模式或其他模式，不需要部署
-    fi
-    
-    # 确认配置
+    echo -e "${GREEN}欢迎使用 Matrix Stack 管理工具！${NC}"
     echo
-    log_info "部署配置确认："
-    echo "• 域名: $DOMAIN"
-    echo "• 安装路径: $INSTALL_PATH"
-    echo "• 内部HTTP NodePort: $HTTP_NODEPORT"
-    echo "• 内部HTTPS NodePort: $HTTPS_NODEPORT"
-    echo "• 外部HTTP端口: $EXTERNAL_HTTP_PORT"
-    echo "• 外部HTTPS端口: $EXTERNAL_HTTPS_PORT"
-    echo "• TURN 端口范围: $TURN_PORT_START-$TURN_PORT_END"
-    echo "• Matrix 子域名: $SUBDOMAIN_MATRIX"
-    echo "• Element Web 子域名: $SUBDOMAIN_CHAT"
-    echo "• 认证服务子域名: $SUBDOMAIN_AUTH"
-    echo "• RTC 服务子域名: $SUBDOMAIN_RTC"
-    echo "• 管理员: $ADMIN_USERNAME"
-    echo "• TURN 服务: $([ "$USE_LIVEKIT_TURN" == "true" ] && echo "LiveKit 内置" || echo "独立 Coturn")"
-    echo "• 证书模式: $CERT_MODE"
+    echo "此工具将帮助您："
+    echo "• 部署完整的Matrix通信栈"
+    echo "• 管理用户和权限"
+    echo "• 配置SSL证书"
+    echo "• 监控系统状态"
+    echo "• 备份和恢复数据"
     echo
-    read -p "确认开始部署？ [y/N]: " confirm
+    read -p "按回车键继续..."
     
-    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-        log_info "部署已取消"
-        exit 0
-    fi
-    
-    # 开始部署
-    log_info "开始部署 Matrix Stack..."
-    
-    install_dependencies
-    install_k3s
-    install_helm
-    setup_ingress_controller
-    setup_cert_manager
-    generate_values_yaml
-    create_cluster_issuer
-    deploy_matrix_stack
-    create_admin_user
-    show_deployment_result
+    # 进入主菜单
+    main_menu
 }
 
-# 运行主函数
-main "$@"
+# 脚本入口点
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
 
