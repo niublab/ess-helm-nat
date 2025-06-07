@@ -83,7 +83,7 @@ show_banner() {
     echo -e "${CYAN}"
     cat << 'EOF'
 ╔══════════════════════════════════════════════════════════════════╗
-║              Matrix Stack 完整安装和管理工具 v2.5                ║
+║              Matrix Stack 完整安装和管理工具 v2.5               ║
 ║                                                                  ║
 ║  🚀 支持完全自定义配置                                           ║
 ║  🏠 专为 NAT 环境和动态 IP 设计                                  ║
@@ -216,6 +216,22 @@ create_user() {
     read -p "请输入显示名称 (可选): " display_name
     
     SYNAPSE_POD=$(kubectl get pods -n ess -l app.kubernetes.io/name=synapse-main -o jsonpath='{.items[0].metadata.name}')
+    
+    # 等待 Synapse API 可用
+    log_info "检查 Synapse API 状态..."
+    for i in {1..30}; do
+        if kubectl exec -n ess "$SYNAPSE_POD" -- curl -s http://localhost:8008/_matrix/client/versions >/dev/null 2>&1; then
+            log_success "Synapse API 已就绪"
+            break
+        fi
+        if [[ $i -eq 30 ]]; then
+            log_error "Synapse API 不可用，请检查服务状态"
+            read -p "按回车键继续..."
+            show_user_management
+            return
+        fi
+        sleep 2
+    done
     
     if [[ "$is_admin" == "y" || "$is_admin" == "Y" ]]; then
         SHARED_SECRET=$(kubectl exec -n ess "$SYNAPSE_POD" -- cat /secrets/ess-generated/SYNAPSE_REGISTRATION_SHARED_SECRET)
@@ -1344,6 +1360,20 @@ create_admin_user() {
     # 获取 Synapse pod 名称
     SYNAPSE_POD=$(kubectl get pods -n ess -l app.kubernetes.io/name=synapse-main -o jsonpath='{.items[0].metadata.name}')
     
+    # 等待 Synapse API 可用
+    log_info "等待 Synapse API 启动..."
+    for i in {1..60}; do
+        if kubectl exec -n ess "$SYNAPSE_POD" -- curl -s http://localhost:8008/_matrix/client/versions >/dev/null 2>&1; then
+            log_success "Synapse API 已就绪"
+            break
+        fi
+        if [[ $i -eq 60 ]]; then
+            log_error "Synapse API 启动超时"
+            return 1
+        fi
+        sleep 5
+    done
+    
     # 创建管理员用户
     SHARED_SECRET=$(kubectl exec -n ess "$SYNAPSE_POD" -- cat /secrets/ess-generated/SYNAPSE_REGISTRATION_SHARED_SECRET)
     kubectl exec -n ess "$SYNAPSE_POD" -- register_new_matrix_user \
@@ -1842,4 +1872,3 @@ main() {
 
 # 运行主函数
 main "$@"
-
