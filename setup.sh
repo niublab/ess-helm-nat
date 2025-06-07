@@ -83,7 +83,7 @@ show_banner() {
     echo -e "${CYAN}"
     cat << 'EOF'
 ╔══════════════════════════════════════════════════════════════════╗
-║              Matrix Stack 完整安装和管理工具 v2.5               ║
+║              Matrix Stack 完整安装和管理工具                    ║
 ║                                                                  ║
 ║  🚀 支持完全自定义配置                                           ║
 ║  🏠 专为 NAT 环境和动态 IP 设计                                  ║
@@ -978,7 +978,7 @@ install_dependencies() {
     log_info "安装系统依赖..."
     
     apt-get update
-    apt-get install -y curl wget git sudo apt-transport-https ca-certificates gnupg lsb-release python3 python3-json
+    apt-get install -y curl wget git sudo apt-transport-https ca-certificates gnupg lsb-release python3
     
     log_success "依赖安装完成"
 }
