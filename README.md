@@ -73,22 +73,26 @@
 
 ## 🚀 快速开始
 
-### 1. 下载脚本
+### 方法一：一键部署（推荐）
 ```bash
-wget https://raw.githubusercontent.com/niublab/ess-helm-nat/main/setup.sh
-chmod +x setup.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/niublab/ess-helm-nat/main/setup.sh)
 ```
 
-### 2. 运行安装
+### 方法二：下载后运行
 ```bash
+# 1. 下载脚本
+wget https://raw.githubusercontent.com/niublab/ess-htlm-nat/main/setup.sh
+chmod +x setup.sh
+
+# 2. 运行安装
 sudo ./setup.sh
 ```
 
-### 3. 选择部署模式
+### 选择部署模式
 - **快速部署** - 使用默认配置，适合新手
 - **自定义配置** - 完全自定义所有参数
 
-### 4. 配置网络
+### 配置网络
 根据脚本提示配置路由器端口转发：
 - 外部 8080 → 内部 30080 (HTTP)
 - 外部 8443 → 内部 30443 (HTTPS)
