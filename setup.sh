@@ -1,7 +1,7 @@
 #!/bin/bash
-# Matrix Stack 安装管理工具
+# Matrix Stack 完整安装和管理工具 v2.5
 # 支持完全自定义配置、高级用户管理、清理功能和证书切换
-# 基于 element-hq/ess-helm 项目
+# 基于 element-hq/ess-helm 项目 - 修正所有已知问题
 
 set -e
 
@@ -83,7 +83,7 @@ show_banner() {
     echo -e "${CYAN}"
     cat << 'EOF'
 ╔══════════════════════════════════════════════════════════════════╗
-║              Matrix Stack 完整安装和管理工具                    ║
+║              Matrix Stack 完整安装和管理工具 v2.5               ║
 ║                                                                  ║
 ║  🚀 支持完全自定义配置                                           ║
 ║  🏠 专为 NAT 环境和动态 IP 设计                                  ║
@@ -218,18 +218,20 @@ create_user() {
     SYNAPSE_POD=$(kubectl get pods -n ess -l app.kubernetes.io/name=synapse-main -o jsonpath='{.items[0].metadata.name}')
     
     if [[ "$is_admin" == "y" || "$is_admin" == "Y" ]]; then
-        kubectl exec -n ess "$SYNAPSE_POD" -- register_new_matrix_user -k $(kubectl exec -n ess "$SYNAPSE_POD" -- cat /secrets/ess-generated/SYNAPSE_REGISTRATION_SHARED_SECRET) \
+        SHARED_SECRET=$(kubectl exec -n ess "$SYNAPSE_POD" -- cat /secrets/ess-generated/SYNAPSE_REGISTRATION_SHARED_SECRET)
+        kubectl exec -n ess "$SYNAPSE_POD" -- register_new_matrix_user \
+            -k "$SHARED_SECRET" \
             -u "$username" \
             -p "$password" \
             -a \
-            -c /data/homeserver.yaml \
             http://localhost:8008
         log_success "管理员用户 $username 创建完成"
     else
-        kubectl exec -n ess "$SYNAPSE_POD" -- register_new_matrix_user -k $(kubectl exec -n ess "$SYNAPSE_POD" -- cat /secrets/ess-generated/SYNAPSE_REGISTRATION_SHARED_SECRET) \
+        SHARED_SECRET=$(kubectl exec -n ess "$SYNAPSE_POD" -- cat /secrets/ess-generated/SYNAPSE_REGISTRATION_SHARED_SECRET)
+        kubectl exec -n ess "$SYNAPSE_POD" -- register_new_matrix_user \
+            -k "$SHARED_SECRET" \
             -u "$username" \
             -p "$password" \
-            -c /data/homeserver.yaml \
             http://localhost:8008
         log_success "普通用户 $username 创建完成"
     fi
@@ -978,7 +980,7 @@ install_dependencies() {
     log_info "安装系统依赖..."
     
     apt-get update
-    apt-get install -y curl wget git sudo apt-transport-https ca-certificates gnupg lsb-release python3
+    apt-get install -y curl wget git sudo apt-transport-https ca-certificates gnupg lsb-release python3 python3-json
     
     log_success "依赖安装完成"
 }
@@ -1263,11 +1265,12 @@ create_admin_user() {
     SYNAPSE_POD=$(kubectl get pods -n ess -l app.kubernetes.io/name=synapse-main -o jsonpath='{.items[0].metadata.name}')
     
     # 创建管理员用户
-    kubectl exec -n ess "$SYNAPSE_POD" -- register_new_matrix_user -k $(kubectl exec -n ess "$SYNAPSE_POD" -- cat /secrets/ess-generated/SYNAPSE_REGISTRATION_SHARED_SECRET) \
+    SHARED_SECRET=$(kubectl exec -n ess "$SYNAPSE_POD" -- cat /secrets/ess-generated/SYNAPSE_REGISTRATION_SHARED_SECRET)
+    kubectl exec -n ess "$SYNAPSE_POD" -- register_new_matrix_user \
+        -k "$SHARED_SECRET" \
         -u "$ADMIN_USERNAME" \
         -p "$ADMIN_PASSWORD" \
         -a \
-        -c /data/homeserver.yaml \
         http://localhost:8008
     
     log_success "管理员用户创建完成: $ADMIN_USERNAME"
