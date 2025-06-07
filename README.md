@@ -75,7 +75,7 @@
 
 ### 1. 下载脚本
 ```bash
-wget https://raw.githubusercontent.com/niublab/test/main/setup.sh
+wget https://raw.githubusercontent.com/niublab/ess-helm-nat/main/setup.sh
 chmod +x setup.sh
 ```
 
