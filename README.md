@@ -81,7 +81,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/niublab/ess-helm-nat/main/se
 ### 方法二：下载后运行
 ```bash
 # 1. 下载脚本
-wget https://raw.githubusercontent.com/niublab/ess-htlm-nat/main/setup.sh
+wget https://raw.githubusercontent.com/niublab/ess-helm-nat/main/setup.sh
 chmod +x setup.sh
 
 # 2. 运行安装
