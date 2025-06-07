@@ -83,7 +83,7 @@ show_banner() {
     echo -e "${CYAN}"
     cat << 'EOF'
 ╔══════════════════════════════════════════════════════════════════╗
-║              Matrix Stack 安装管理工具                        ║
+║              Matrix Stack 完整安装和管理工具 v2.5                ║
 ║                                                                  ║
 ║  🚀 支持完全自定义配置                                           ║
 ║  🏠 专为 NAT 环境和动态 IP 设计                                  ║
@@ -587,14 +587,14 @@ show_cleanup_menu() {
     echo "4) 🗑️ 清理 Kubernetes 集群"
     echo "0) 🔙 返回主菜单"
     echo
-    read -p "请选择 [1-5]: " cleanup_choice
+    read -p "请选择 [0-4]: " cleanup_choice
     
     case $cleanup_choice in
         1) cleanup_failed_deployment ;;
         2) reset_configuration ;;
         3) full_uninstall ;;
         4) cleanup_kubernetes ;;
-        5) show_main_menu ;;
+        0) show_main_menu ;;
         *) log_error "无效选项"; show_cleanup_menu ;;
     esac
 }
@@ -864,10 +864,12 @@ configure_certificates() {
     echo -e "${CYAN}请选择证书配置模式：${NC}"
     echo "1) Let's Encrypt (HTTP-01) - 需要公网访问"
     echo "2) Let's Encrypt (DNS-01) - 支持内网部署"
-    echo "3) 自签名证书 - 测试环境"
-    echo "4) 手动证书 - 使用现有证书"
+    echo "3) Let's Encrypt Staging (HTTP-01) - 测试环境 🧪"
+    echo "4) Let's Encrypt Staging (DNS-01) - 测试环境 🧪"
+    echo "5) 自签名证书 - 测试环境"
+    echo "6) 手动证书 - 使用现有证书"
     echo
-    read -p "请选择 [1-4]: " cert_choice
+    read -p "请选择 [1-6]: " cert_choice
     
     case $cert_choice in
         1) 
@@ -879,10 +881,21 @@ configure_certificates() {
             configure_dns_provider
             ;;
         3) 
+            CERT_MODE="letsencrypt-staging-http"
+            log_success "已选择 Let's Encrypt Staging (HTTP-01) 模式 🧪"
+            log_info "注意：Staging证书不被浏览器信任，仅用于测试"
+            ;;
+        4) 
+            CERT_MODE="letsencrypt-staging-dns"
+            log_success "已选择 Let's Encrypt Staging (DNS-01) 模式 🧪"
+            log_info "注意：Staging证书不被浏览器信任，仅用于测试"
+            configure_dns_provider
+            ;;
+        5) 
             CERT_MODE="selfsigned"
             log_success "已选择自签名证书模式"
             ;;
-        4) 
+        6) 
             CERT_MODE="manual"
             log_success "已选择手动证书模式"
             ;;
@@ -1080,6 +1093,23 @@ generate_values_yaml() {
     
     mkdir -p "${INSTALL_PATH}/configs"
     
+    # 根据证书模式设置ClusterIssuer名称
+    local cluster_issuer_name
+    case $CERT_MODE in
+        "letsencrypt-http"|"letsencrypt-dns")
+            cluster_issuer_name="letsencrypt-prod"
+            ;;
+        "letsencrypt-staging-http"|"letsencrypt-staging-dns")
+            cluster_issuer_name="letsencrypt-staging"
+            ;;
+        "selfsigned")
+            cluster_issuer_name="selfsigned-issuer"
+            ;;
+        *)
+            cluster_issuer_name="letsencrypt-prod"
+            ;;
+    esac
+    
     cat > "${INSTALL_PATH}/configs/values.yaml" << EOF
 # Matrix Stack 配置文件 - 符合官方schema
 # 生成时间: $(date)
@@ -1089,14 +1119,14 @@ serverName: "${SUBDOMAIN_MATRIX}.${DOMAIN}"
 
 # 证书管理器配置
 certManager:
-  clusterIssuer: "letsencrypt-prod"
+  clusterIssuer: "${cluster_issuer_name}"
 
 # 全局Ingress配置
 ingress:
   className: "nginx"
   tlsEnabled: true
   annotations:
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    cert-manager.io/cluster-issuer: "${cluster_issuer_name}"
 
 # Synapse 配置
 synapse:
@@ -1104,7 +1134,7 @@ synapse:
   ingress:
     host: "${SUBDOMAIN_MATRIX}.${DOMAIN}"
     annotations:
-      cert-manager.io/cluster-issuer: "letsencrypt-prod"
+      cert-manager.io/cluster-issuer: "${cluster_issuer_name}"
     className: "nginx"
     tlsEnabled: true
 
@@ -1115,7 +1145,7 @@ elementWeb:
   ingress:
     host: "${SUBDOMAIN_CHAT}.${DOMAIN}"
     annotations:
-      cert-manager.io/cluster-issuer: "letsencrypt-prod"
+      cert-manager.io/cluster-issuer: "${cluster_issuer_name}"
     className: "nginx"
     tlsEnabled: true
   additional:
@@ -1127,7 +1157,7 @@ matrixAuthenticationService:
   ingress:
     host: "${SUBDOMAIN_AUTH}.${DOMAIN}"
     annotations:
-      cert-manager.io/cluster-issuer: "letsencrypt-prod"
+      cert-manager.io/cluster-issuer: "${cluster_issuer_name}"
     className: "nginx"
     tlsEnabled: true
 
@@ -1137,7 +1167,7 @@ matrixRTC:
   ingress:
     host: "${SUBDOMAIN_RTC}.${DOMAIN}"
     annotations:
-      cert-manager.io/cluster-issuer: "letsencrypt-prod"
+      cert-manager.io/cluster-issuer: "${cluster_issuer_name}"
     className: "nginx"
     tlsEnabled: true
 
@@ -1196,6 +1226,24 @@ spec:
           class: nginx
 EOF
             ;;
+        "letsencrypt-staging-http")
+            cat > "${INSTALL_PATH}/configs/cluster-issuer.yaml" << EOF
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: ${ADMIN_EMAIL}
+    privateKeySecretRef:
+      name: letsencrypt-staging
+    solvers:
+    - http01:
+        ingress:
+          class: nginx
+EOF
+            ;;
         "letsencrypt-dns")
             cat > "${INSTALL_PATH}/configs/cluster-issuer.yaml" << EOF
 apiVersion: cert-manager.io/v1
@@ -1216,9 +1264,41 @@ spec:
             key: api-token
 EOF
             # 创建 DNS API 密钥 Secret
-            kubectl create secret generic cloudflare-api-token \
-                --from-literal=api-token="$DNS_API_KEY" \
-                --namespace cert-manager
+            if ! kubectl get secret cloudflare-api-token -n cert-manager &>/dev/null; then
+                kubectl create secret generic cloudflare-api-token \
+                    --from-literal=api-token="$DNS_API_KEY" \
+                    --namespace cert-manager
+            else
+                log_info "Secret cloudflare-api-token 已存在，跳过创建"
+            fi
+            ;;
+        "letsencrypt-staging-dns")
+            cat > "${INSTALL_PATH}/configs/cluster-issuer.yaml" << EOF
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: ${ADMIN_EMAIL}
+    privateKeySecretRef:
+      name: letsencrypt-staging
+    solvers:
+    - dns01:
+        cloudflare:
+          apiTokenSecretRef:
+            name: cloudflare-api-token
+            key: api-token
+EOF
+            # 创建 DNS API 密钥 Secret
+            if ! kubectl get secret cloudflare-api-token -n cert-manager &>/dev/null; then
+                kubectl create secret generic cloudflare-api-token \
+                    --from-literal=api-token="$DNS_API_KEY" \
+                    --namespace cert-manager
+            else
+                log_info "Secret cloudflare-api-token 已存在，跳过创建"
+            fi
             ;;
         "selfsigned")
             cat > "${INSTALL_PATH}/configs/cluster-issuer.yaml" << EOF
@@ -1762,3 +1842,4 @@ main() {
 
 # 运行主函数
 main "$@"
+
